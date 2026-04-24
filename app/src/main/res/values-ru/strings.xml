@@ -128,4 +128,12 @@
     <string name="action_download">Скачать</string>
     <string name="filter_in_app_storage">Встроенное хранилище</string>
     <string name="external_file_prompt_title">Сохранить файл?</string>
+    <string name="chapter">Transition,Бесшовный</string>
+    <string name="options_clear_reflow_cache">Очистить кэш</string>
+    <string name="external_file_prompt_desc">Вы хотите сохранить этот внешний файл в библиотеке приложения? Если нет, он будет удален.\n\n(Вы можете изменить это поведение по умолчанию в любое время на главном экране &gt; Дополнительные параметры &gt; Поведение внешних файлов).</string>
+    <string name="external_file_dont_ask">Не спрашивать снова</string>
+    <string name="external_file_keep">Сохранить в библиотеке</string>
+    <string name="external_file_delete">Удалить</string>
+    <string name="external_file_behavior_ask">Спрашивать каждый раз</string>
+    <string name="external_file_behavior_keep">Всегда сохранять</string>
 </resources>
