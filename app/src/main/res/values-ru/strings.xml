@@ -223,7 +223,7 @@
     <string name="dialog_destructive_action_desc">Это действие удалит данные безвозвратно. Продолжить?</string>
     <string name="dialog_clear_book_cache">Очистить кэш книги</string>
     <string name="dialog_clear_book_cache_desc">Это освободит место на устройстве. Скачанные файлы придется загрузить заново.</string>
-    <string name="action_confirm_clear">Очистить</string>
+    <string name="action_confirm_clear">Подтвердить и очистить</string>
     <string name="dialog_clear_reflow_cache">Очистить кэш перекомпоновки (Reflow)</string>
     <string name="dialog_clear_reflow_cache_desc">Сгенерированные текстовые версии страниц будут удалены. Для текстового режима их придется создать заново.</string>
     <string name="tooltip_back">Назад</string>
@@ -237,7 +237,7 @@
     <string name="tooltip_tts_start">Озвучить</string>
     <string name="tooltip_tts_stop">Остановить озвучивание</string>
     <string name="tooltip_tts_pause">Пауза</string>
-    <string name="tooltip_tts_resume">Продолжить озвучивание</string>
+    <string name="tooltip_tts_resume">Продолжить</string>
     <string name="tooltip_dark_mode_on">Включить темную тему</string>
     <string name="tooltip_dark_mode_off">Выключить темную тему</string>
     <string name="tooltip_lock_pan">Заблокировать панорамирование</string>
@@ -283,7 +283,7 @@
     <string name="action_sign_in">Войти</string>
     <string name="action_select_folder">Выбрать папку</string>
     <string name="action_select">Выбрать</string>
-    <string name="legal_footer_combined">Используя приложение, вы соглашаетесь с Условиями использования и Политикой конфиденциальности.</string>
+    <string name="legal_footer_combined">Политика конфиденциальности • Условия использования • Лицензии</string>
     <string name="error_folder_selection_unsupported">Выбор папки не поддерживается на этом устройстве.</string>
     <string name="error_no_file_manager">Файловый менеджер не найден.</string>
     <string name="banner_downloaded">Успешно скачано %1$s</string>
@@ -396,7 +396,7 @@
     <string name="dict_fallback_app">Резервное приложение</string>
     <string name="dict_dictionary_app">Словарное приложение</string>
     <string name="dict_select_app">Выбрать приложение</string>
-    <string name="dict_translate">Переводчик</string>
+    <string name="dict_translate">Перевести</string>
     <string name="dict_translate_description">Приложение для перевода текста.</string>
     <string name="dict_search_app">Поисковая система</string>
     <string name="dict_search_app_description">Приложение для поиска в интернете.</string>
@@ -473,7 +473,7 @@
     <string name="banner_original_pdf_not_found">Оригинал PDF не найден.</string>
     <string name="error_book_content_not_found">Ошибка: Содержимое книги не найдено. Путь: %1$s</string>
     <string name="toast_select_dictionary_first">Сначала выберите приложение словаря.</string>
-    <string name="toast_select_translate_first">Сначала выберите приложение переводчика.</string>
+    <string name="toast_select_translate_first">Пожалуйста, сначала выберите приложение для перевода.</string>
     <string name="toast_select_search_first">Сначала выберите приложение для поиска.</string>
     <string name="no_chapters_available">Главы недоступны.</string>
     <string name="navigating_to_position">Переход к позиции…</string>
@@ -653,7 +653,7 @@
     <string name="content_desc_already_downloaded">Уже скачано</string>
     <string name="generating_summary">Генерация краткого содержания…</string>
     <string name="action_copy_thread">Скопировать переписку</string>
-    <string name="no_summary_generated">Краткое содержание не сгенерировано</string>
+    <string name="no_summary_generated">Краткое содержание не сгенерировано.</string>
     <string name="ai_thinking">ИИ думает…</string>
     <string name="ai_no_definition">ИИ не смог дать определение.</string>
     <string name="ai_asking_about">Спросить ИИ о \'%1$s\'…</string>
