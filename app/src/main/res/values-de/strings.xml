@@ -1044,4 +1044,7 @@
     <string name="tts_replacements_enable">Ersetzungen aktivieren</string>
     <string name="tts_replacements_add_rule">Regel hinzufügen</string>
     <string name="tts_replacements_add_book_rule">Buch-Regel hinzufügen</string>
+    <string name="dialog_download_bubble_zoom_model">Bubble Zoom Modell herunterladen</string>
+    <string name="dialog_download_bubble_zoom_model_desc">Um die Bubble Zoom Funktion zu nutzen, muss ein KI Modell heruntergeladen werden (~134 MB). Jetzt herunterladen?</string>
+    <string name="msg_downloading_bubble_zoom_model_progress">Bubble Zoom Modell herunterladen... %1$d%%</string>
 </resources>
