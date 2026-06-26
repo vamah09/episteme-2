@@ -57,7 +57,8 @@ internal fun BookItem.hasEmbeddedMetadataChange(updated: BookItem): Boolean {
         author != updated.author ||
         description != updated.description ||
         seriesName != updated.seriesName ||
-        seriesIndex != updated.seriesIndex
+        seriesIndex != updated.seriesIndex ||
+        coverImagePath != updated.coverImagePath
 }
 
 internal fun String.toDesktopSafeFileName(): String {
@@ -207,6 +208,7 @@ internal fun LibraryScreen(
     onSelect: (String) -> Unit,
     onClearSelection: () -> Unit,
     onRemoveSelected: () -> Unit,
+    onExportAnnotations: (BookItem) -> Unit = {},
     onShowBookInfo: (BookItem) -> Unit,
     onEditBook: (BookItem) -> Unit,
     onCreateShelf: () -> Unit,
@@ -235,6 +237,7 @@ internal fun LibraryScreen(
         onToggleSelection = onSelect,
         onClearSelection = onClearSelection,
         onRemoveSelected = onRemoveSelected,
+        onExportAnnotations = onExportAnnotations,
         onShowBookInfo = onShowBookInfo,
         onEditBook = onEditBook,
         onCreateShelf = onCreateShelf,

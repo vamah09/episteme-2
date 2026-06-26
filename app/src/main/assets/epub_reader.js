@@ -27,7 +27,8 @@
 
         // CHANGED: Colors now use rgba() with 0.5 opacity for blending
         style.innerHTML = ` html {
-                margin: 0; padding: 0; height: 100%; overflow-y: scroll;
+                margin: 0; padding: 0; height: 100%; overflow-y: scroll; overflow-x: hidden;
+                width: 100%; max-width: 100%;
             }
 
             body {
@@ -37,13 +38,55 @@
                 text-rendering: optimizeLegibility; -webkit-user-select: none;
                 -moz-user-select: none; -ms-user-select: none; user-select: none;
                 scroll-behavior: auto !important;
+                overflow-x: hidden !important;
+                width: 100% !important;
+                max-width: 100% !important;
             }
 
             #content-container {
                 will-change: transform;
                 transition: none !important;
+                box-sizing: border-box;
+                overflow-x: hidden !important;
+                width: 100%;
+                max-width: 100%;
             }
 
+            *,
+            *::before,
+            *::after {
+                box-sizing: border-box;
+            }
+
+            #content-container *,
+            body > * {
+                max-width: 100% !important;
+                min-width: 0 !important;
+            }
+
+            p, div, li, blockquote, section, article, aside, header, footer, main, td, th, span, a {
+                overflow-wrap: anywhere;
+                word-break: break-word;
+            }
+
+            pre, code, samp, kbd, .reader-txt-preformatted {
+                white-space: pre-wrap !important;
+                overflow-wrap: anywhere !important;
+                word-break: break-word !important;
+                max-width: 100% !important;
+            }
+
+            table {
+                width: 100% !important;
+                max-width: 100% !important;
+                table-layout: fixed !important;
+                border-collapse: collapse;
+            }
+
+            td, th {
+                overflow-wrap: anywhere !important;
+                word-break: break-word !important;
+            }
             p, div, li, td, th, span {
                 font-size: 1em; line-height: inherit;
             }
@@ -970,6 +1013,43 @@
                 padding-right: ${horizontalPaddingPx}px !important;
                 padding-top: ${verticalPaddingPx}px !important;
                 padding-bottom: ${verticalPaddingPx}px !important;
+                overflow-x: hidden !important;
+                width: 100% !important;
+                max-width: 100% !important;
+            }
+        `;
+
+        var viewportContainmentCss = `
+            html,
+            body,
+            #content-container {
+                overflow-x: hidden !important;
+                width: 100% !important;
+                max-width: 100% !important;
+            }
+            #content-container *,
+            body > * {
+                max-width: 100% !important;
+                min-width: 0 !important;
+            }
+            p, div, li, blockquote, section, article, aside, header, footer, main, td, th, span, a {
+                overflow-wrap: anywhere !important;
+                word-break: break-word !important;
+            }
+            pre, code, samp, kbd, .reader-txt-preformatted {
+                white-space: pre-wrap !important;
+                overflow-wrap: anywhere !important;
+                word-break: break-word !important;
+                max-width: 100% !important;
+            }
+            table {
+                width: 100% !important;
+                max-width: 100% !important;
+                table-layout: fixed !important;
+            }
+            td, th {
+                overflow-wrap: anywhere !important;
+                word-break: break-word !important;
             }
         `;
 
@@ -998,7 +1078,7 @@
             }
         `;
 
-        dynamicStyleElement.innerHTML = [sizeCss, lineHeightCss, fontCss, alignCss, gapCss, imageCss, horizontalMarginCss].join("\n");
+        dynamicStyleElement.innerHTML = [sizeCss, lineHeightCss, fontCss, alignCss, gapCss, viewportContainmentCss, imageCss, horizontalMarginCss].join("\n");
         applyReaderImageAnchors();
         setTimeout(applyReaderImageAnchors, 80);
         logVerticalJitter(
@@ -2970,7 +3050,7 @@
     }
 
     window.HighlightBridgeHelper = {
-        updateHighlightStyle: function (cfi, newColorClass, colorId) {
+        updateHighlightStyle: function (cfi, newColorClass, colorId, colorCss, highlightStyle) {
             console.log(`${HL_LOG_TAG}: updateHighlightStyle called. CFI: ${cfi}, Class: ${newColorClass}`);
 
             var allSpans = document.querySelectorAll('span[class*="user-highlight-"]');
@@ -2990,17 +3070,47 @@
                     classesToRemove.forEach((cls) => span.classList.remove(cls));
 
                     span.classList.add(newColorClass);
+                    this.applyHighlightVisualStyle(span, colorCss, highlightStyle);
                 }
             });
 
             if (window.HighlightBridge) {
                 var sampleSpan = document.querySelector(`span[data-cfi*='${cfi}']`);
                 var text = sampleSpan ? sampleSpan.textContent : "";
-                window.HighlightBridge.onHighlightCreated(cfi, text, colorId);
+                window.HighlightBridge.onHighlightCreated(cfi, text, colorId, highlightStyle || "background");
             }
         },
 
-        createUserHighlight: function (colorClass, colorId) {
+
+        applyHighlightVisualStyle: function (span, colorCss, highlightStyle) {
+            var style = highlightStyle || "background";
+            span.setAttribute("data-highlight-style", style);
+            span.setAttribute("data-reader-highlight-style", style);
+            span.style.removeProperty("background-color");
+            span.style.removeProperty("text-decoration-line");
+            span.style.removeProperty("text-decoration-style");
+            span.style.removeProperty("text-decoration-color");
+            span.style.removeProperty("text-decoration-thickness");
+            span.style.removeProperty("text-underline-offset");
+            if (style === "underline" || style === "wavy_underline") {
+                span.style.setProperty("background-color", "transparent", "important");
+                span.style.setProperty("text-decoration-line", "underline", "important");
+                span.style.setProperty("text-decoration-style", style === "wavy_underline" ? "wavy" : "solid", "important");
+                if (colorCss) span.style.setProperty("text-decoration-color", colorCss, "important");
+                span.style.setProperty("text-decoration-thickness", "0.12em", "important");
+                span.style.setProperty("text-underline-offset", "0.18em", "important");
+            } else if (style === "strikethrough") {
+                span.style.setProperty("background-color", "transparent", "important");
+                span.style.setProperty("text-decoration-line", "line-through", "important");
+                span.style.setProperty("text-decoration-style", "solid", "important");
+                if (colorCss) span.style.setProperty("text-decoration-color", colorCss, "important");
+                span.style.setProperty("text-decoration-thickness", "0.12em", "important");
+            } else if (colorCss) {
+                span.style.setProperty("background-color", colorCss, "important");
+            }
+        },
+
+        createUserHighlight: function (colorClass, colorId, colorCss, highlightStyle) {
             console.log(`$ {
                     HL_LOG_TAG
                 }
@@ -3082,12 +3192,12 @@
                     `);
 
                 range = this.normalizeRangeBoundaries(range);
-                this.highlightRangeSafe(range, colorClass, finalCfi);
+                this.highlightRangeSafe(range, colorClass, finalCfi, colorCss, highlightStyle);
 
                 selection.removeAllRanges();
 
                 if (window.HighlightBridge) {
-                    window.HighlightBridge.onHighlightCreated(finalCfi, text, colorId);
+                    window.HighlightBridge.onHighlightCreated(finalCfi, text, colorId, highlightStyle || "background");
                 }
             } catch (e) {
                 console.log(
@@ -3124,7 +3234,7 @@
             return range;
         },
 
-        highlightRangeSafe: function (range, className, newCfi) {
+        highlightRangeSafe: function (range, className, newCfi, colorCss, highlightStyle) {
             var nodes = this.getTextNodesInRange(range);
 
             nodes.forEach((node) => {
@@ -3137,11 +3247,13 @@
                     if (!cfiList.includes(newCfi)) {
                         parent.setAttribute("data-cfi", currentCfi ? (currentCfi + ";;" + newCfi) : newCfi);
                     }
+                    this.applyHighlightVisualStyle(parent, colorCss, highlightStyle);
                 } else {
                     if (node.nodeValue.trim().length === 0) return;
                     var span = document.createElement("span");
                     span.className = className;
                     span.setAttribute("data-cfi", newCfi);
+                    this.applyHighlightVisualStyle(span, colorCss, highlightStyle);
                     node.parentNode.insertBefore(span, node);
                     span.appendChild(node);
                 }
@@ -3350,7 +3462,7 @@
                 " text='" + hlRenderPreview(highlight.text || "", 80) + "' " +
                 hlRenderLocatorLabel(highlight.locator || {})
             );
-            this.applyHighlight(highlight.cfi, highlight.text, highlight.cssClass, highlight.locator || null);
+            this.applyHighlight(highlight.cfi, highlight.text, highlight.cssClass, highlight.locator || null, highlight.colorCss || null, highlight.style || "background");
         },
 
         highlightTextRoot: function () {
@@ -3649,7 +3761,7 @@
             return range;
         },
 
-        applyHighlight: function (cfi, text, cssClass, locator) {
+        applyHighlight: function (cfi, text, cssClass, locator, colorCss, highlightStyle) {
             try {
                 cssClass = cssClass || "user-highlight-yellow";
                 var alreadyApplied = false;
@@ -3703,7 +3815,7 @@
                     return;
                 }
                 var normalizedRange = this.normalizeRangeBoundaries(range);
-                this.highlightRangeSafe(normalizedRange, cssClass, cfi);
+                this.highlightRangeSafe(normalizedRange, cssClass, cfi, colorCss, highlightStyle);
                 hlRenderLog(
                     "webview_apply_result applied=true cfi=" + hlRenderPreview(cfi || "", 120) +
                     " source=" + rangeSource +

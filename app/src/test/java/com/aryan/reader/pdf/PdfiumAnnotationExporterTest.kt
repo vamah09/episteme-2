@@ -7,6 +7,7 @@ import androidx.compose.ui.graphics.toArgb
 import com.aryan.reader.pdf.data.PdfAnnotation
 import com.aryan.reader.pdf.data.PdfTextBox
 import com.aryan.reader.pdf.data.VirtualPage
+import com.aryan.reader.shared.HighlightStyle
 import com.aryan.reader.shared.pdf.SharedPdfAnnotationComment
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -149,6 +150,89 @@ class PdfiumAnnotationExporterTest {
         )
         assertEquals("D:20231114221320Z", payload.highlightCommentCreatedDates[0])
         assertEquals("D:20231114221340Z", payload.highlightCommentModifiedDates[0])
+    }
+
+    @Test
+    fun `buildPayload exports custom highlight palette color instead of legacy slot default`() {
+        val customColor = Color(0xFF7B1FA2)
+        val payload = PdfiumAnnotationExporter.buildPayload(
+            inkAnnotations = emptyMap(),
+            textBoxes = emptyList(),
+            highlights = listOf(
+                PdfUserHighlight(
+                    id = "custom-highlight",
+                    pageIndex = 0,
+                    bounds = listOf(RectF(10f, 90f, 40f, 80f)),
+                    color = PdfHighlightColor.YELLOW,
+                    text = "Selected text",
+                    range = 0 to 13
+                )
+            ),
+            customHighlightColors = mapOf(PdfHighlightColor.YELLOW to customColor),
+            pageSizes = listOf(PdfiumPageSize(width = 100, height = 100))
+        )
+
+        assertArrayEquals(intArrayOf(customColor.toArgb()), payload.highlightColors)
+    }
+
+    @Test
+    fun `buildPayload exports persisted highlight argb when custom palette is unavailable`() {
+        val persistedColor = Color(0xFF00695C)
+        val payload = PdfiumAnnotationExporter.buildPayload(
+            inkAnnotations = emptyMap(),
+            textBoxes = emptyList(),
+            highlights = listOf(
+                PdfUserHighlight(
+                    id = "persisted-highlight",
+                    pageIndex = 0,
+                    bounds = listOf(RectF(10f, 90f, 40f, 80f)),
+                    color = PdfHighlightColor.YELLOW,
+                    colorArgb = persistedColor.toArgb(),
+                    text = "Selected text",
+                    range = 0 to 13
+                )
+            ),
+            pageSizes = listOf(PdfiumPageSize(width = 100, height = 100))
+        )
+
+        assertArrayEquals(intArrayOf(persistedColor.toArgb()), payload.highlightColors)
+    }
+
+    @Test
+    fun `buildPayload maps highlight styles to native PDF text markup subtypes`() {
+        val highlights = listOf(
+            HighlightStyle.BACKGROUND,
+            HighlightStyle.UNDERLINE,
+            HighlightStyle.WAVY_UNDERLINE,
+            HighlightStyle.STRIKETHROUGH
+        ).mapIndexed { index, style ->
+            PdfUserHighlight(
+                id = "highlight-$index",
+                pageIndex = 0,
+                bounds = listOf(RectF(10f, 90f, 40f, 80f)),
+                color = PdfHighlightColor.YELLOW,
+                style = style,
+                text = "Selected text",
+                range = 0 to 13
+            )
+        }
+
+        val payload = PdfiumAnnotationExporter.buildPayload(
+            inkAnnotations = emptyMap(),
+            textBoxes = emptyList(),
+            highlights = highlights,
+            pageSizes = listOf(PdfiumPageSize(width = 100, height = 100))
+        )
+
+        assertArrayEquals(
+            intArrayOf(
+                PDFIUM_ANNOT_HIGHLIGHT,
+                PDFIUM_ANNOT_UNDERLINE,
+                PDFIUM_ANNOT_SQUIGGLY,
+                PDFIUM_ANNOT_STRIKEOUT
+            ),
+            payload.highlightSubtypes
+        )
     }
 
     @Test

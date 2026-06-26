@@ -140,6 +140,18 @@ private data class PageNavigationEntry(
     val anchors: Set<String>
 )
 
+private const val TxtFormatTraceTag = "TxtFormatTrace"
+private const val NATIVE_VERTICAL_LOAD_LOG_TAG = "NativeVerticalLoad"
+
+private fun String.txtFormatTracePreview(maxLength: Int = 220): String {
+    return replace("\\", "\\\\")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+        .let { if (it.length <= maxLength) it else it.take(maxLength) + "..." }
+        .replace("\"", "\\\"")
+}
+
 @OptIn(ExperimentalSerializationApi::class)
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
 @Stable
@@ -301,21 +313,14 @@ class BookPaginator(
                     BookProcessingWorker.cancelForBook(context, bookId)
                 }
 
-                // 3. TRY LOAD EXACT COUNTS FROM DB
+                // 3. Seed counts with fast estimates, then overlay measured cached counts.
                 coroutineContext.ensureActive()
                 if (isDisposed()) return@launch
-                val cachedConfig = bookCacheDao.getConfigurationCache(bookId, currentConfigHash)
+                seedEstimatedPageCounts()
 
                 coroutineContext.ensureActive()
                 if (isDisposed()) return@launch
-                if (cachedConfig != null) {
-                    Timber.i("Configuration Cache HIT. Using saved page counts.")
-                    applyAccuratePageCounts(cachedConfig.chapterPageCounts)
-                } else {
-                    Timber.i("Configuration Cache MISS. Running instant estimator.")
-                    runEstimator()
-                }
-
+                applyCachedMeasuredPageCounts()
                 // 4. Start Worker
                 paginationWorker = startPaginationWorker()
 
@@ -339,7 +344,7 @@ class BookPaginator(
         }
     }
 
-    private fun runEstimator() {
+    private fun seedEstimatedPageCounts() {
         var runningTotal = 0
 
         // This loop is extremely fast (math only)
@@ -392,47 +397,74 @@ class BookPaginator(
         return hash
     }
 
-    private fun applyAccuratePageCounts(countsString: String?) {
-        val countsMap = if (!countsString.isNullOrBlank()) {
-            try {
-                countsString.split(',').filter { it.contains(':') }.associate {
-                    val (index, count) = it.split(':')
-                    index.toInt() to count.toInt()
-                }
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to parse chapter page counts string.")
-                mapOf()
-            }
-        } else {
-            mapOf()
+    private suspend fun applyCachedMeasuredPageCounts() {
+        val measuredCounts = linkedMapOf<Int, Int>()
+        val measuredChapters = linkedSetOf<Int>()
+
+        val cachedConfig = bookCacheDao.getConfigurationCache(bookId, currentConfigHash)
+        val snapshot = PageCountCacheCodec.decode(cachedConfig?.chapterPageCounts)
+        when {
+            cachedConfig == null -> Timber.i("Configuration Cache MISS. Using estimates until measured counts are available.")
+            snapshot.isVersioned -> Timber.i(
+                "Configuration Cache HIT. finalized=${snapshot.finalizedChapters.size}/${chapters.size} measuredCounts=${snapshot.counts.size}"
+            )
+            else -> Timber.i("Legacy configuration cache found. Ignoring ambiguous page counts and using page-cache metadata instead.")
         }
 
-        if (countsMap.isEmpty()) {
-            runEstimator() // Fallback if string was empty
+        if (snapshot.isVersioned) {
+            snapshot.finalizedChapters.forEach { chapterIndex ->
+                val count = snapshot.counts[chapterIndex]
+                if (chapterIndex in chapters.indices && count != null && count > 0) {
+                    measuredCounts[chapterIndex] = count
+                    measuredChapters += chapterIndex
+                }
+            }
+        }
+
+        val pageMetadata = bookCacheDao.getPageCacheMetadataForConfig(
+            bookId = bookId,
+            configHash = currentConfigHash,
+            processingVersion = LATEST_PROCESSING_VERSION,
+            pageCacheVersion = LATEST_PAGE_CACHE_VERSION
+        )
+        pageMetadata.forEach { metadata ->
+            val chapter = chapters.getOrNull(metadata.chapterIndex) ?: return@forEach
+            if (metadata.contentVersion == chapterContentVersion(chapter) && metadata.pageCount > 0) {
+                measuredCounts[metadata.chapterIndex] = metadata.pageCount
+                measuredChapters += metadata.chapterIndex
+            }
+        }
+
+        if (measuredCounts.isEmpty()) {
+            Timber.i("No compatible measured page counts found. Estimated counts remain active.")
             return
         }
 
-        var runningTotal = 0
-        chapters.forEachIndexed { index, chapter ->
-            // Use cached count if available, otherwise estimate
-            val pageCount = countsMap[index] ?: PageCountEstimator.estimateChapterPageCount(
-                chapter, constraints, textStyle, density
-            )
-
-            chapterPageCounts[index] = pageCount
-            chapterStartPageIndices[index] = runningTotal
-            runningTotal += pageCount
+        measuredCounts.forEach { (chapterIndex, count) ->
+            chapterPageCounts[chapterIndex] = count
         }
-        totalPageCount = runningTotal
-        pageCountsAreAccurate = countsMap.size == chapters.size
-        rebuildChapterStartSnapshot()
+        finalizedChapterCounts.addAll(measuredChapters)
+        rebuildPageStartsFromCounts()
+        pageCountsAreAccurate = finalizedChapterCounts.size >= chapters.size
+        Timber.i(
+            "Applied measured page counts. finalized=${finalizedChapterCounts.size}/${chapters.size} totalPageCount=$totalPageCount"
+        )
     }
 
+    private fun rebuildPageStartsFromCounts() {
+        var runningTotal = 0
+        chapters.indices.forEach { index ->
+            chapterStartPageIndices[index] = runningTotal
+            runningTotal += chapterPageCounts[index] ?: 1
+        }
+        totalPageCount = runningTotal
+        rebuildChapterStartSnapshot()
+    }
     private suspend fun updateAndSaveConfigurationCache() {
-        val countsString = chapterPageCounts.entries
-            .sortedBy { it.key }
-            .joinToString(",") { "${it.key}:${it.value}" }
-
+        val countsString = PageCountCacheCodec.encode(
+            counts = chapterPageCounts,
+            finalizedChapters = finalizedChapterCounts
+        )
         val newCache = ConfigurationCache(
             bookId = bookId,
             configHash = currentConfigHash,
@@ -931,6 +963,10 @@ class BookPaginator(
 
                     if (!shouldIgnoreCache) {
                         Timber.d("getBlocksForChapter: Cache HIT for chapter $chapterIndex in DATABASE.")
+                        Timber.tag("HtmlImportDebug").w(
+                            "paginator_semantic_cache_hit bookId=$bookId chapter=$chapterIndex blocks=${semanticBlocks.size} " +
+                                "lazyChapter=${chapter.htmlContent.isEmpty()} configHash=$currentConfigHash"
+                        )
                         val styledBlocks = styler.style(semanticBlocks)
                         Timber.tag(TAG_PAGINATED_LINK_DIAG).d(
                             "content_from_semantic_cache chapter=$chapterIndex configHash=$currentConfigHash " +
@@ -947,6 +983,10 @@ class BookPaginator(
         }
 
         Timber.d("getBlocksForChapter: Cache MISS for chapter $chapterIndex. Parsing to Semantic IR.")
+        Timber.tag("HtmlImportDebug").d(
+            "paginator_cache_miss bookId=$bookId chapter=$chapterIndex chapterAbsPath=${chapter.absPath} " +
+                "htmlContentChars=${chapter.htmlContent.length} extractionBasePath=$extractionBasePath"
+        )
 
         var htmlToParse = chapter.htmlContent
         if (htmlToParse.isEmpty()) {
@@ -955,6 +995,11 @@ class BookPaginator(
                 Timber.tag("ReflowPaginationDiag").d("getBlocksForChapter: Lazy loading content from disk for chapter $chapterIndex: ${file.name} (${file.length()} bytes)")
                 try {
                     htmlToParse = file.readText()
+                    val lazyHtmlHasProductEzoic = htmlToParse.contains("productEzoicAds", ignoreCase = true)
+                    Timber.tag("HtmlImportDebug").d(
+                        "paginator_lazy_html_loaded bookId=$bookId chapter=$chapterIndex file=${file.absolutePath} " +
+                            "fileBytes=${file.length()} htmlChars=${htmlToParse.length} productEzoic=$lazyHtmlHasProductEzoic"
+                    )
                 } catch (e: Exception) {
                     Timber.tag("ReflowPaginationDiag").e(e, "Failed to read lazy HTML file")
                 }
@@ -963,7 +1008,24 @@ class BookPaginator(
             }
         }
 
+        val txtTraceContainsPreWrap = htmlToParse.contains("white-space: pre-wrap") || htmlToParse.contains("white-space:pre-wrap")
+        val txtTraceContainsAlbumMarker = htmlToParse.contains("===========CD 1=============")
+        Timber.tag(TxtFormatTraceTag).d(
+            "event=android_paginator_html_input bookId=$bookId chapter=$chapterIndex title=${chapter.title.txtFormatTracePreview()} " +
+                "htmlChars=${htmlToParse.length} newlines=${htmlToParse.count { it == '\n' }} " +
+                "plainChars=${chapter.plainTextCharacterCount()} containsPreWrap=$txtTraceContainsPreWrap " +
+                "containsAlbumMarker=$txtTraceContainsAlbumMarker preview=${htmlToParse.txtFormatTracePreview()}"
+        )
         val document = Jsoup.parse(htmlToParse, chapter.absPath)
+        document.outputSettings().prettyPrint(false)
+        val htmlInputHasProductEzoic = htmlToParse.contains("productEzoicAds", ignoreCase = true)
+        val parsedBlockedNodeCount = document.select("script, style, noscript, template").size
+        val parsedBodyTextHasProductEzoic = document.body().text().contains("productEzoicAds", ignoreCase = true)
+        Timber.tag("HtmlImportDebug").d(
+            "paginator_jsoup_parsed bookId=$bookId chapter=$chapterIndex htmlChars=${htmlToParse.length} " +
+                "scriptNodes=$parsedBlockedNodeCount bodyTextHasProductEzoic=$parsedBodyTextHasProductEzoic " +
+                "htmlHasProductEzoic=$htmlInputHasProductEzoic"
+        )
         Timber.tag(TAG_PAGINATED_LINK_DIAG).d(
             "html_parse_input chapter=$chapterIndex htmlChars=${htmlToParse.length} " +
                 document.readerHtmlLinkDiagSummary()
@@ -999,6 +1061,15 @@ class BookPaginator(
             parsingCssRules = parsingCssRules.merge(bookCssResult.rules)
         }
 
+        val txtTraceProcessedHasInlinePreWrap = processedHtml.contains("white-space: pre-wrap !important")
+        Timber.tag(TxtFormatTraceTag).d(
+            "event=android_paginator_processed_html bookId=$bookId chapter=$chapterIndex " +
+                "htmlChars=${processedHtml.length} newlines=${processedHtml.count { it == '\n' }} " +
+                "containsInlinePreWrap=$txtTraceProcessedHasInlinePreWrap " +
+                "containsAlbumMarker=${processedHtml.contains("===========CD 1=============")} " +
+                "preview=${processedHtml.txtFormatTracePreview()}"
+        )
+
         val semanticBlocks = androidHtmlToSemanticBlocks(
             html = processedHtml,
             cssRules = parsingCssRules,
@@ -1014,6 +1085,16 @@ class BookPaginator(
         Timber.tag(TAG_PAGINATED_LINK_DIAG).d(
             "semantic_parse_result chapter=$chapterIndex " +
                 semanticBlocks.readerSemanticLinkDiagSummary()
+        )
+        val firstTxtSemantic = semanticBlocks.filterIsInstance<SemanticTextBlock>()
+            .firstOrNull { it.text.contains("===========CD 1=============") || it.text.contains("[ID]") }
+        Timber.tag(TxtFormatTraceTag).d(
+            "event=android_paginator_semantic_result bookId=$bookId chapter=$chapterIndex " +
+                "textBlocks=${semanticBlocks.filterIsInstance<SemanticTextBlock>().size} " +
+                "firstTxtChars=${firstTxtSemantic?.text?.length ?: 0} " +
+                "firstTxtNewlines=${firstTxtSemantic?.text?.count { it == '\n' } ?: 0} " +
+                "firstTxtHasRepeatedSpaces=${firstTxtSemantic?.text?.let { Regex(" {2,}").containsMatchIn(it) } == true} " +
+                "preview=${firstTxtSemantic?.text.orEmpty().txtFormatTracePreview()}"
         )
 
         if (!isDisposed()) paginatorScope.launch(Dispatchers.IO) {
@@ -1039,7 +1120,29 @@ class BookPaginator(
         coroutineContext.ensureActive()
         if (isDisposed()) return@withContext null
         val chapter = chapters.getOrNull(chapterIndex) ?: return@withContext null
-        getCachedBlocksForChapter(chapter, chapterIndex)
+        val startMs = System.currentTimeMillis()
+        val memoryHit = blockCache[chapterIndex] != null
+        Timber.tag(NATIVE_VERTICAL_LOAD_LOG_TAG).d(
+            "flow_blocks_start chapter=$chapterIndex memoryHit=$memoryHit"
+        )
+        try {
+            getCachedBlocksForChapter(chapter, chapterIndex).also { blocks ->
+                Timber.tag(NATIVE_VERTICAL_LOAD_LOG_TAG).d(
+                    "flow_blocks_done chapter=$chapterIndex blocks=${blocks.size} memoryHit=$memoryHit durationMs=${System.currentTimeMillis() - startMs}"
+                )
+            }
+        } catch (e: CancellationException) {
+            Timber.tag(NATIVE_VERTICAL_LOAD_LOG_TAG).d(
+                "flow_blocks_cancelled chapter=$chapterIndex memoryHit=$memoryHit durationMs=${System.currentTimeMillis() - startMs}"
+            )
+            throw e
+        } catch (e: Exception) {
+            Timber.tag(NATIVE_VERTICAL_LOAD_LOG_TAG).e(
+                e,
+                "flow_blocks_error chapter=$chapterIndex memoryHit=$memoryHit durationMs=${System.currentTimeMillis() - startMs}"
+            )
+            throw e
+        }
     }
 
     private fun startPaginationWorker(): Job = paginatorScope.launch(Dispatchers.IO) {

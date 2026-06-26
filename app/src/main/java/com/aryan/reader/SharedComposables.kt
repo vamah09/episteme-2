@@ -26,6 +26,7 @@ import android.net.Uri
 import android.text.TextUtils
 import android.text.method.LinkMovementMethod
 import android.widget.TextView
+import androidx.documentfile.provider.DocumentFile
 import androidx.activity.compose.ManagedActivityResultLauncher
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -83,6 +84,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Save
@@ -94,6 +96,8 @@ import androidx.compose.material.icons.outlined.Policy
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -115,6 +119,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.toArgb
@@ -135,6 +140,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -143,6 +149,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
 import androidx.core.text.HtmlCompat
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.aryan.reader.shared.SharedFileCapabilities
 import com.aryan.reader.shared.SharedLegalLinks
 import com.aryan.reader.shared.SharedLegalProfile
@@ -152,6 +160,7 @@ import com.aryan.reader.shared.SharedText
 import com.aryan.reader.shared.sharedLegalLinksForProfile
 import com.aryan.reader.shared.ui.SharedMarkdownText
 import timber.log.Timber
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -278,54 +287,188 @@ fun ContextualTopAppBar(
     onInfoClick: (() -> Unit)? = null,
     onSaveClick: (() -> Unit)? = null,
     onShareClick: (() -> Unit)? = null,
+    onExportAnnotationsClick: (() -> Unit)? = null,
     onTagClick: (() -> Unit)? = null,
+    onAddToShelfClick: (() -> Unit)? = null,
     onSelectAllClick: (() -> Unit)? = null,
     onPinClick: (() -> Unit)? = null,
-    onDeleteClick: () -> Unit
+    onDeleteClick: () -> Unit,
+    compactSelectionActions: Boolean = false,
+    overflowDeleteLabelRes: Int = R.string.action_delete,
+    onClearSelectionClick: (() -> Unit)? = null
 ) {
     CustomTopAppBar(
-        title = { Text(stringResource(R.string.items_selected_count, selectedItemCount)) },
+        title = {
+            Text(
+                text = stringResource(R.string.items_selected_count, selectedItemCount),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        },
         navigationIcon = {
             IconButton(onClick = onNavIconClick) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.clear_selection))
             }
         },
         actions = {
-            if (onTagClick != null) {
-                IconButton(onClick = onTagClick) {
-                    Icon(painterResource(id = R.drawable.tag), contentDescription = stringResource(R.string.content_desc_tag))
+            if (compactSelectionActions) {
+                CompactSelectionActions(
+                    selectedItemCount = selectedItemCount,
+                    onInfoClick = onInfoClick,
+                    onPinClick = onPinClick,
+                    onSelectAllClick = onSelectAllClick,
+                    onTagClick = onTagClick,
+                    onAddToShelfClick = onAddToShelfClick,
+                    onSaveClick = onSaveClick,
+                    onShareClick = onShareClick,
+                    onExportAnnotationsClick = onExportAnnotationsClick,
+                    onClearSelectionClick = onClearSelectionClick ?: onNavIconClick,
+                    onDeleteClick = onDeleteClick,
+                    deleteLabelRes = overflowDeleteLabelRes
+                )
+            } else {
+                if (onTagClick != null) {
+                    IconButton(onClick = onTagClick) {
+                        Icon(painterResource(id = R.drawable.tag), contentDescription = stringResource(R.string.content_desc_tag))
+                    }
                 }
-            }
-            if (onPinClick != null) {
-                IconButton(onClick = onPinClick) {
-                    Icon(Icons.Filled.PushPin, contentDescription = stringResource(R.string.pin_unpin))
+                if (onPinClick != null) {
+                    IconButton(onClick = onPinClick) {
+                        Icon(Icons.Filled.PushPin, contentDescription = stringResource(R.string.pin_unpin))
+                    }
                 }
-            }
-            if (selectedItemCount == 1 && onInfoClick != null) {
-                IconButton(onClick = onInfoClick) {
-                    Icon(Icons.Filled.Info, contentDescription = stringResource(R.string.info))
+                if (selectedItemCount == 1 && onInfoClick != null) {
+                    IconButton(onClick = onInfoClick) {
+                        Icon(Icons.Filled.Info, contentDescription = stringResource(R.string.info))
+                    }
                 }
-            }
-            if (selectedItemCount == 1 && onSaveClick != null) {
-                IconButton(onClick = onSaveClick) {
-                    Icon(Icons.Filled.Save, contentDescription = stringResource(R.string.action_save_copy_to_device))
+                if (selectedItemCount == 1 && onSaveClick != null) {
+                    IconButton(onClick = onSaveClick) {
+                        Icon(Icons.Filled.Save, contentDescription = stringResource(R.string.action_save_copy_to_device))
+                    }
                 }
-            }
-            if (selectedItemCount == 1 && onShareClick != null) {
-                IconButton(onClick = onShareClick) {
-                    Icon(Icons.Filled.Share, contentDescription = stringResource(R.string.action_share))
+                if (selectedItemCount == 1 && onShareClick != null) {
+                    IconButton(onClick = onShareClick) {
+                        Icon(Icons.Filled.Share, contentDescription = stringResource(R.string.action_share))
+                    }
                 }
-            }
-            if (onSelectAllClick != null) {
-                IconButton(onClick = onSelectAllClick) {
-                    Icon(Icons.Filled.SelectAll, contentDescription = stringResource(R.string.select_all))
+                if (onSelectAllClick != null) {
+                    IconButton(onClick = onSelectAllClick) {
+                        Icon(Icons.Filled.SelectAll, contentDescription = stringResource(R.string.select_all))
+                    }
                 }
-            }
-            IconButton(onClick = onDeleteClick) {
-                Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.action_delete))
+                IconButton(onClick = onDeleteClick) {
+                    Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.action_delete))
+                }
             }
         }
     )
+}
+
+@Composable
+private fun CompactSelectionActions(
+    selectedItemCount: Int,
+    onInfoClick: (() -> Unit)?,
+    onPinClick: (() -> Unit)?,
+    onSelectAllClick: (() -> Unit)?,
+    onTagClick: (() -> Unit)?,
+    onAddToShelfClick: (() -> Unit)?,
+    onSaveClick: (() -> Unit)?,
+    onShareClick: (() -> Unit)?,
+    onExportAnnotationsClick: (() -> Unit)?,
+    onClearSelectionClick: () -> Unit,
+    onDeleteClick: () -> Unit,
+    deleteLabelRes: Int
+) {
+    var showMoreMenu by remember { mutableStateOf(false) }
+
+    if (selectedItemCount == 1 && onInfoClick != null) {
+        IconButton(onClick = onInfoClick) {
+            Icon(Icons.Filled.Info, contentDescription = stringResource(R.string.info))
+        }
+    }
+    if (onPinClick != null) {
+        IconButton(onClick = onPinClick) {
+            Icon(Icons.Filled.PushPin, contentDescription = stringResource(R.string.pin_unpin))
+        }
+    }
+    if (onSelectAllClick != null) {
+        IconButton(onClick = onSelectAllClick) {
+            Icon(Icons.Filled.SelectAll, contentDescription = stringResource(R.string.select_all))
+        }
+    }
+    IconButton(onClick = onDeleteClick) {
+        Icon(Icons.Filled.Delete, contentDescription = stringResource(deleteLabelRes))
+    }
+
+    Box {
+        IconButton(onClick = { showMoreMenu = true }) {
+            Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.content_desc_more_options))
+        }
+        DropdownMenu(
+            expanded = showMoreMenu,
+            onDismissRequest = { showMoreMenu = false }
+        ) {
+            onTagClick?.let { tag ->
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.content_desc_tag)) },
+                    leadingIcon = { Icon(painterResource(id = R.drawable.tag), contentDescription = null) },
+                    onClick = {
+                        showMoreMenu = false
+                        tag()
+                    }
+                )
+            }
+            onAddToShelfClick?.let { addToShelf ->
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.desktop_add_to_shelf)) },
+                    leadingIcon = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                    onClick = {
+                        showMoreMenu = false
+                        addToShelf()
+                    }
+                )
+            }
+            if (selectedItemCount == 1 && onSaveClick != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.action_save_copy_to_device)) },
+                    leadingIcon = { Icon(Icons.Filled.Save, contentDescription = null) },
+                    onClick = {
+                        showMoreMenu = false
+                        onSaveClick()
+                    }
+                )
+            }
+            if (selectedItemCount == 1 && onShareClick != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.action_share)) },
+                    leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
+                    onClick = {
+                        showMoreMenu = false
+                        onShareClick()
+                    }
+                )
+            }
+            if (selectedItemCount == 1 && onExportAnnotationsClick != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.action_export_annotations)) },
+                    leadingIcon = { Icon(Icons.Filled.Save, contentDescription = null) },
+                    onClick = {
+                        showMoreMenu = false
+                        onExportAnnotationsClick()
+                    }
+                )
+            }
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.action_clear)) },
+                leadingIcon = { Icon(Icons.Filled.Close, contentDescription = null) },
+                onClick = {
+                    showMoreMenu = false
+                    onClearSelectionClick()
+                }
+            )
+        }
+    }
 }
 
 @Composable
@@ -439,6 +582,17 @@ fun FileInfoDialog(
         mutableStateOf(item.customName ?: item.cardTitle(usePdfFileNameAsDisplayName))
     }
     var showRestoreConfirmation by remember(item.bookId) { mutableStateOf(false) }
+    var selectedCoverUri by remember(item.bookId) { mutableStateOf<Uri?>(null) }
+    var selectedCoverName by remember(item.bookId) { mutableStateOf<String?>(null) }
+    val coverPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            selectedCoverUri = uri
+            selectedCoverName = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment
+        }
+    }
 
     val formattedDate = remember(item.timestamp) {
         SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(Date(item.timestamp))
@@ -513,6 +667,7 @@ fun FileInfoDialog(
                     if (isEditing) {
                         if (canEditEmbeddedMetadata) {
                             BookMetadataEditContent(
+                                item = item,
                                 titleInput = titleInput,
                                 onTitleChange = { titleInput = it },
                                 authorInput = authorInput,
@@ -522,7 +677,15 @@ fun FileInfoDialog(
                                 seriesIndexInput = seriesIndexInput,
                                 onSeriesIndexChange = { seriesIndexInput = it },
                                 descriptionInput = descriptionInput,
-                                onDescriptionChange = { descriptionInput = it }
+                                onDescriptionChange = { descriptionInput = it },
+                                currentCoverPath = item.coverImagePath,
+                                selectedCoverUri = selectedCoverUri,
+                                selectedCoverName = selectedCoverName,
+                                onChooseCover = { coverPickerLauncher.launch(arrayOf("image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp")) },
+                                onClearCover = {
+                                    selectedCoverUri = null
+                                    selectedCoverName = null
+                                }
                             )
                         } else if (canRenameDisplayName) {
                             BookDisplayNameEditContent(
@@ -569,7 +732,8 @@ fun FileInfoDialog(
                                     author = authorInput.toMetadataValue(),
                                     seriesName = seriesInput.toMetadataValue(),
                                     seriesIndex = seriesIndexInput.toSeriesIndexOrNull(),
-                                    description = descriptionInput.toMetadataValue()
+                                    description = descriptionInput.toMetadataValue(),
+                                    coverImageUri = selectedCoverUri?.toString()
                                 )
                             )
                         } else if (canRenameDisplayName) {
@@ -754,6 +918,7 @@ private fun BookMetadataInfoContent(
 
 @Composable
 private fun BookMetadataEditContent(
+    item: RecentFileItem,
     titleInput: String,
     onTitleChange: (String) -> Unit,
     authorInput: String,
@@ -763,7 +928,12 @@ private fun BookMetadataEditContent(
     seriesIndexInput: String,
     onSeriesIndexChange: (String) -> Unit,
     descriptionInput: String,
-    onDescriptionChange: (String) -> Unit
+    onDescriptionChange: (String) -> Unit,
+    currentCoverPath: String?,
+    selectedCoverUri: Uri?,
+    selectedCoverName: String?,
+    onChooseCover: () -> Unit,
+    onClearCover: () -> Unit
 ) {
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -812,6 +982,97 @@ private fun BookMetadataEditContent(
                 minLines = 4,
                 maxLines = 10
             )
+            MetadataCoverPreview(
+                item = item,
+                currentCoverPath = currentCoverPath,
+                selectedCoverUri = selectedCoverUri,
+                selectedCoverName = selectedCoverName,
+                onChooseCover = onChooseCover,
+                onClearCover = onClearCover
+            )
+        }
+    }
+}
+
+@Composable
+private fun MetadataCoverPreview(
+    item: RecentFileItem,
+    currentCoverPath: String?,
+    selectedCoverUri: Uri?,
+    selectedCoverName: String?,
+    onChooseCover: () -> Unit,
+    onClearCover: () -> Unit
+) {
+    val context = LocalContext.current
+    val currentCoverFile = remember(currentCoverPath) {
+        currentCoverPath
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.takeIf { it.isFile }
+    }
+    val previewModel = selectedCoverUri ?: currentCoverFile
+    val previewRequest = remember(previewModel, context) {
+        previewModel?.let {
+            ImageRequest.Builder(context)
+                .data(it)
+                .crossfade(true)
+                .build()
+        }
+    }
+
+    Text(stringResource(R.string.label_cover), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = 72.dp, height = 104.dp)
+                .clip(RoundedCornerShape(8.dp))
+        ) {
+            ThemedBookCover(
+                item = item,
+                modifier = Modifier.fillMaxSize(),
+                contentDescription = null
+            )
+            if (previewRequest != null) {
+                AsyncImage(
+                    model = previewRequest,
+                    contentDescription = stringResource(R.string.label_cover),
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                selectedCoverName ?: if (currentCoverFile != null) {
+                    stringResource(R.string.label_current_cover)
+                } else {
+                    stringResource(R.string.label_current_cover_generated)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(onClick = onChooseCover) {
+                    Text(stringResource(R.string.action_change_cover))
+                }
+                if (selectedCoverName != null) {
+                    TextButton(onClick = onClearCover) {
+                        Text(stringResource(R.string.action_clear_selection))
+                    }
+                }
+            }
         }
     }
 }
@@ -1754,10 +2015,12 @@ fun TagSelectionBottomSheet(
     booksWithTags: List<RecentFileItem>,
     onCreateAndAssign: (String) -> Unit,
     onToggleTag: (String, Boolean) -> Unit,
+    onDeleteTag: (TagEntity) -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var searchQuery by remember { mutableStateOf("") }
+    var tagPendingDeletion by remember { mutableStateOf<TagEntity?>(null) }
 
     val filteredTags = remember(allTags, searchQuery) {
         if (searchQuery.isBlank()) allTags else allTags.filter { it.name.contains(searchQuery, ignoreCase = true) }
@@ -1826,10 +2089,42 @@ fun TagSelectionBottomSheet(
                             }
                         }
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text(tag.name, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            tag.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { tagPendingDeletion = tag }) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = stringResource(R.string.menu_delete_tag),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+
+    tagPendingDeletion?.let { tag ->
+        AlertDialog(
+            onDismissRequest = { tagPendingDeletion = null },
+            title = { Text(stringResource(R.string.menu_delete_tag)) },
+            text = { Text(stringResource(R.string.dialog_delete_tag_desc, tag.name)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteTag(tag)
+                    tagPendingDeletion = null
+                }) {
+                    Text(stringResource(R.string.action_delete))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { tagPendingDeletion = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            }
+        )
     }
 }

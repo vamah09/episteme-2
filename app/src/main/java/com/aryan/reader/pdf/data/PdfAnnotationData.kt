@@ -28,6 +28,7 @@ import com.aryan.reader.pdf.InkType
 import com.aryan.reader.pdf.PdfHighlightColor
 import com.aryan.reader.pdf.PdfPoint
 import com.aryan.reader.pdf.PdfUserHighlight
+import com.aryan.reader.shared.HighlightStyle
 import com.aryan.reader.shared.pdf.SharedPdfAnnotationComment
 import org.json.JSONArray
 import org.json.JSONObject
@@ -232,9 +233,11 @@ object HighlightSerializer {
             obj.put("id", h.id)
             obj.put("pageIndex", h.pageIndex)
             obj.put("color", h.color.name)
+            h.colorArgb?.let { obj.put("colorArgb", it) }
             obj.put("text", h.text)
             obj.put("rangeStart", h.range.first)
             obj.put("rangeEnd", h.range.second)
+            obj.put("style", h.style.id)
 
             if (!h.note.isNullOrBlank()) {
                 obj.put("note", h.note)
@@ -283,8 +286,10 @@ object HighlightSerializer {
                         pageIndex = obj.getInt("pageIndex"),
                         bounds = bounds,
                         color = try { PdfHighlightColor.valueOf(obj.getString("color")) } catch(_: Exception) { PdfHighlightColor.YELLOW },
+                        colorArgb = obj.optNullableInt("colorArgb"),
                         text = obj.optString("text", ""),
                         range = Pair(obj.optInt("rangeStart", 0), obj.optInt("rangeEnd", 0)),
+                        style = HighlightStyle.fromId(if (obj.has("style")) obj.optString("style") else null),
                         note = obj.optString("note").takeIf { !it.isNullOrBlank() },
                         comments = obj.optJSONArray("comments").toSharedPdfAnnotationComments()
                     )
@@ -340,5 +345,9 @@ object HighlightSerializer {
             )
         }
         return comments
+    }
+
+    private fun JSONObject.optNullableInt(name: String): Int? {
+        return if (has(name) && !isNull(name)) optInt(name) else null
     }
 }

@@ -11,6 +11,8 @@ import com.aryan.reader.shared.SharedReaderScreenState
 import com.aryan.reader.shared.reduce
 
 internal object AndroidSharedStateBridge {
+    private val projectionBookItemCache = SharedProjectionBookItemCache()
+
     fun prepareLibraryProjection(
         input: LibraryProjectionInput,
         folderPathResolver: FolderPathResolver
@@ -28,7 +30,7 @@ internal object AndroidSharedStateBridge {
             ),
             booksFromStore = taggedBooks
                 .filterNot { it.bookId.endsWith("_reflow") }
-                .map { it.toSharedProjectionBookItem() },
+                .let(projectionBookItemCache::map),
             shelfRecords = input.dbShelves.map { it.toSharedShelfRecord() },
             shelfRefs = input.shelfRefs.map { it.toSharedBookShelfRef() },
             tags = input.dbTags.map { it.toSharedTag() }
@@ -119,7 +121,8 @@ internal object AndroidSharedStateBridge {
         projectedState: ReaderScreenState,
         bookId: String
     ): ReaderScreenState {
-        val reduced = current.toBridgeSharedState(projectedState).reduce(SharedAppAction.BookTabOpened(bookId))
+        val reconciled = current.withProjectedTabState(projectedState)
+        val reduced = reconciled.toBridgeSharedState(projectedState).reduce(SharedAppAction.BookTabOpened(bookId))
         return current.withTabStateFrom(reduced)
     }
 
@@ -128,13 +131,19 @@ internal object AndroidSharedStateBridge {
         projectedState: ReaderScreenState,
         bookId: String
     ): ReaderScreenState {
-        val reduced = current.toBridgeSharedState(projectedState).reduce(SharedAppAction.BookTabClosed(bookId))
+        val reconciled = current.withProjectedTabState(projectedState)
+        val reduced = reconciled.toBridgeSharedState(projectedState).reduce(SharedAppAction.BookTabClosed(bookId))
         return current.withTabStateFrom(reduced)
     }
 
     fun closeAllTabs(current: ReaderScreenState, projectedState: ReaderScreenState): ReaderScreenState {
-        val reduced = current.toBridgeSharedState(projectedState).reduce(SharedAppAction.AllTabsClosed)
+        val reconciled = current.withProjectedTabState(projectedState)
+        val reduced = reconciled.toBridgeSharedState(projectedState).reduce(SharedAppAction.AllTabsClosed)
         return current.withTabStateFrom(reduced)
+    }
+
+    fun reconcileTabState(current: ReaderScreenState, projectedState: ReaderScreenState): ReaderScreenState {
+        return current.withProjectedTabState(projectedState)
     }
 
     fun togglePinsForSelectedBooks(
@@ -207,6 +216,19 @@ internal object AndroidSharedStateBridge {
             openTabIds = sharedState.openTabIds,
             activeTabBookId = sharedState.activeTabBookId
         )
+    }
+
+    private fun ReaderScreenState.withProjectedTabState(projectedState: ReaderScreenState): ReaderScreenState {
+        val projectedOpenTabIds = projectedState.openTabIds
+        val projectedActiveTabBookId = projectedState.activeTabBookId?.takeIf { it in projectedOpenTabIds }
+        return if (openTabIds == projectedOpenTabIds && activeTabBookId == projectedActiveTabBookId) {
+            this
+        } else {
+            copy(
+                openTabIds = projectedOpenTabIds,
+                activeTabBookId = projectedActiveTabBookId
+            )
+        }
     }
 }
 

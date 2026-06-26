@@ -487,6 +487,10 @@
     <string name="banner_original_pdf_saved">Original PDF saved successfully.</string>
     <string name="banner_saving_original_file">Saving original file...</string>
     <string name="banner_original_file_saved">Original file saved successfully.</string>
+    <string name="banner_exporting_annotations">Exporting annotations...</string>
+    <string name="banner_annotations_exported">Annotations exported successfully.</string>
+    <string name="banner_no_annotations_to_export">No annotations to export.</string>
+    <string name="error_exporting_annotations">Error exporting annotations: %1$s</string>
     <string name="error_saving_file">Error saving file: %1$s</string>
     <!-- Email/share subject line. %1$s = the name of the file being shared. Example: "Sharing: Dracula.pdf". -->
     <string name="share_subject">Sharing: %1$s</string>
@@ -798,6 +802,8 @@
 
     <!-- EpubReaderDrawer.kt -->
     <string name="tab_chapters">Chapters</string>
+    <string name="search_chapters_placeholder">Search chapters</string>
+    <string name="no_chapters_matching">No chapters found for &quot;%1$s&quot;.</string>
     <string name="tab_tabs">Tabs</string>
     <string name="tab_bookmarks">Bookmarks</string>
     <string name="tab_highlights">Highlights</string>
@@ -936,6 +942,8 @@
     <string name="banner_shelf_renamed">Renamed shelf to &quot;%1$s&quot;.</string>
     <!-- Shared library mutation banner. %1$s = shelf name. Example: "Deleted shelf \"Old Notes\"." -->
     <string name="banner_shelf_deleted">Deleted shelf &quot;%1$s&quot;.</string>
+    <!-- Shared library mutation banner. %1$s = tag name. Example: "Deleted tag \"Favorites\"." -->
+    <string name="banner_tag_deleted">Deleted tag &quot;%1$s&quot;.</string>
     <!-- Shared library mutation banner. %1$s = book title. Example: "Updated \"Dracula\"." -->
     <string name="banner_book_updated">Updated &quot;%1$s&quot;.</string>
     <!-- Shared import result banner shown when selected files already exist in the library. -->
@@ -948,6 +956,8 @@
     <!-- External link warning body. %1$s = the full URL of the external link the user tapped. Example: "You clicked on an external link:\n\nhttps://example.com\n\nWhat would you like to do?" -->
     <string name="dialog_external_link_desc">You clicked on an external link:\n\n%1$s\n\nWhat would you like to do?</string>
     <string name="action_open">Open</string>
+    <string name="menu_delete_tag">Delete tag</string>
+    <string name="dialog_delete_tag_desc">Delete tag &quot;%1$s&quot;? It will be removed from every book.</string>
     <string name="error_no_browser">No browser found to open the link.</string>
 
     <!-- Annotations & Notes -->
@@ -1091,6 +1101,10 @@
     <!-- "Text View" is the name of the PDF reflow feature — keep consistent. -->
     <string name="action_generate_text_view">Generate Text View</string>
     <string name="action_share">Share</string>
+    <string name="action_export_annotations">Export annotations</string>
+    <string name="dialog_export_annotations_title">Export annotations</string>
+    <string name="export_annotations_markdown">Markdown (.md)</string>
+    <string name="export_annotations_text">Text (.txt)</string>
     <string name="action_save_copy_to_device">Save copy to device</string>
     <string name="action_print">Print</string>
     <!-- "Text View" is the name of the PDF reflow feature — keep consistent. -->
@@ -1578,6 +1592,12 @@
     <string name="label_summary">Summary</string>
     <string name="label_library_tags">Library tags</string>
     <string name="label_editable_metadata">Editable metadata</string>
+    <string name="label_cover">Cover</string>
+    <string name="label_current_cover_kept">Current cover will be kept</string>
+    <string name="label_current_cover">Current cover</string>
+    <string name="label_current_cover_generated">Generated cover preview</string>
+    <string name="action_change_cover">Change cover</string>
+    <string name="action_clear_selection">Clear selection</string>
     <string name="label_display_name">Display name</string>
     <string name="label_name_shown_in_reader">Name shown in Reader</string>
     <!-- File metadata row. %1$s = original file name. Example: "Original file: Dracula.epub". -->
@@ -1687,6 +1707,8 @@
     <!-- Desktop credit cost label. %1$s = decimal credit cost. Example: "2.5 credits". -->
     <string name="desktop_credits_decimal_format">%1$s credits</string>
     <string name="desktop_custom_fonts_desc">Imported fonts for the reader</string>
+    <string name="desktop_dev_tools">Dev tools</string>
+    <string name="desktop_dev_tools_desc">Maintenance actions for debugging desktop reader behavior.</string>
     <string name="desktop_delete_font">Delete font</string>
     <!-- Desktop delete-font confirmation. %1$s = font display name. Example: "Delete Merriweather? Books using it will fall back to the default font." -->
     <string name="desktop_delete_font_desc">Delete %1$s? Books using it will fall back to the default font.</string>

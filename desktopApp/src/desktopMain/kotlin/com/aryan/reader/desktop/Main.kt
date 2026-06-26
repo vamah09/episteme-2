@@ -29,6 +29,8 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.rememberWindowState
+import com.aryan.reader.shared.AnnotationExportFormat
+import com.aryan.reader.shared.AnnotationExportFormatter
 import com.aryan.reader.shared.AppAction
 import com.aryan.reader.shared.AppFontPreference
 import com.aryan.reader.shared.BannerMessage
@@ -77,17 +79,22 @@ import com.aryan.reader.shared.opds.OpdsStreamReference
 import com.aryan.reader.shared.opds.SharedOpdsController
 import com.aryan.reader.shared.opds.SharedOpdsDownloadState
 import com.aryan.reader.shared.opds.SharedOpdsStreamUri
+import com.aryan.reader.shared.pdf.SharedPdfAnnotationSerializer
 import com.aryan.reader.shared.pdf.SharedPdfReaderViewport
 import com.aryan.reader.shared.reader.ReaderEngine
 import com.aryan.reader.shared.reader.ReaderImageReference
+import com.aryan.reader.shared.reader.ReaderPaginationMode
+import com.aryan.reader.shared.reader.ReaderReadingMode
 import com.aryan.reader.shared.reader.ReaderSessionState
 import com.aryan.reader.shared.reader.ReaderSettings
+import com.aryan.reader.shared.reader.SharedEpubCoverUpdate
 import com.aryan.reader.shared.reader.SharedEpubMetadataEditor
 import com.aryan.reader.shared.reader.SharedEpubMetadataUpdate
 import com.aryan.reader.shared.reader.SharedEpubPaginationCache
 import com.aryan.reader.shared.reader.SharedJvmBookLoadSemanticMode
 import com.aryan.reader.shared.reader.SharedJvmBookLoader
 import com.aryan.reader.shared.readerCloudTtsControlsModel
+import com.aryan.reader.shared.cardTitle
 import com.aryan.reader.shared.reduce
 import com.aryan.reader.shared.sharedSettingsHubModel
 import com.aryan.reader.shared.shouldApplyRemoteCloudBookMetadataUpdate
@@ -374,6 +381,7 @@ internal fun EpistemeDesktopApp(
     var showCreateSmartShelfDialog by remember { mutableStateOf(false) }
     var shelfToRename by remember { mutableStateOf<Shelf?>(null) }
     var shelfToDelete by remember { mutableStateOf<Shelf?>(null) }
+    var tagToDelete by remember { mutableStateOf<Shelf?>(null) }
     var folderToRemove by remember { mutableStateOf<Shelf?>(null) }
     var addToShelfBookIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var addToShelfClearsSelection by remember { mutableStateOf(false) }
@@ -383,10 +391,12 @@ internal fun EpistemeDesktopApp(
     var showDesktopAppThemeSettingsDialog by remember { mutableStateOf(false) }
     var showDesktopLanguageDialog by remember { mutableStateOf(false) }
     var showClearBookCacheDialog by remember { mutableStateOf(false) }
+    var showDesktopDevToolsDialog by remember { mutableStateOf(false) }
     var desktopFeatureNoticeState by remember { mutableStateOf<DesktopFeatureNoticeState?>(null) }
     var settingsQuery by remember { mutableStateOf("") }
     var settingsDestination by remember { mutableStateOf(SharedSettingsDestination.ROOT) }
     var bookInfoDialogFor by remember { mutableStateOf<BookItem?>(null) }
+    var annotationExportDialogFor by remember { mutableStateOf<BookItem?>(null) }
     var bookInfoInitiallyEditing by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     var dropImportState by remember { mutableStateOf(DesktopDropImportState()) }
@@ -638,6 +648,39 @@ internal fun EpistemeDesktopApp(
         }
     }
 
+    fun exportDesktopAnnotations(book: BookItem, format: AnnotationExportFormat) {
+        val document = when (book.type) {
+            FileType.PDF -> {
+                val annotations = book.path
+                    ?.let(::desktopPdfAnnotationFile)
+                    ?.takeIf { it.isFile }
+                    ?.let { file -> runCatching { SharedPdfAnnotationSerializer.decode(file.readText()) }.getOrDefault(emptyList()) }
+                    .orEmpty()
+                AnnotationExportFormatter.fromPdfAnnotations(
+                    bookTitle = book.cardTitle(),
+                    sourceType = book.type,
+                    annotations = annotations
+                )
+            }
+            else -> AnnotationExportFormatter.fromEpubBook(book)
+        }
+        val exportText = AnnotationExportFormatter.render(document, format)
+        if (exportText.isBlank()) {
+            updateState(state.withBanner("No annotations to export.", isError = true))
+            return
+        }
+        val target = chooseSaveAnnotationExportFile(
+            AnnotationExportFormatter.suggestedFileName(book.cardTitle(), format)
+        ) ?: return
+        runCatching {
+            target.parentFile?.mkdirs()
+            target.writeText(exportText, Charsets.UTF_8)
+        }.onSuccess {
+            updateState(state.withBanner("Saved ${target.name}."))
+        }.onFailure { error ->
+            updateState(state.withBanner(error.message ?: "Could not export annotations.", isError = true))
+        }
+    }
     fun saveDesktopOriginalFile(book: BookItem) {
         val source = book.path?.let(::File)
         if (source?.isFile != true) {
@@ -3099,6 +3142,12 @@ internal fun EpistemeDesktopApp(
         }
     }
 
+    fun deleteTag(tagShelf: Shelf) {
+        val tagId = tagShelf.id.removePrefix("tag_").takeIf { it.isNotBlank() } ?: return
+        SharedLibraryEditor.deleteTag(state, shelfRecords, shelfRefs, tagId)?.let {
+            replaceLibrary(it.state, records = it.shelfRecords, refs = it.shelfRefs)
+        }
+    }
     fun applyBookMetadataUpdate(updated: BookItem) {
         val result = SharedLibraryEditor.updateBookMetadata(state, shelfRecords, shelfRefs, updated, System.currentTimeMillis())
         replaceLibrary(result.state, records = result.shelfRecords, refs = result.shelfRefs)
@@ -3115,6 +3164,14 @@ internal fun EpistemeDesktopApp(
             File(desktopUserDataRoot(), "metadata_backups").apply { mkdirs() },
             "${original.id.toDesktopSafeFileName()}.epub"
         )
+        val coverUpdate = when {
+            updated.coverImagePath == original.coverImagePath -> null
+            updated.coverImagePath.isNullOrBlank() -> SharedEpubMetadataEditor.readCover(backup)
+                ?.let { cover -> SharedEpubCoverUpdate(bytes = cover.bytes, extension = cover.extension) }
+            else -> File(updated.coverImagePath).takeIf { it.isFile }?.let { coverFile ->
+                SharedEpubCoverUpdate(bytes = coverFile.readBytes(), extension = coverFile.extension)
+            }
+        }
         val snapshot = SharedEpubMetadataEditor.rewriteInPlace(
             source = file,
             backup = backup,
@@ -3123,7 +3180,8 @@ internal fun EpistemeDesktopApp(
                 author = updated.author,
                 description = updated.description,
                 seriesName = updated.seriesName,
-                seriesIndex = updated.seriesIndex
+                seriesIndex = updated.seriesIndex,
+                cover = coverUpdate
             )
         )
         return updated.copy(
@@ -3137,6 +3195,7 @@ internal fun EpistemeDesktopApp(
             originalSeriesName = original.originalSeriesName ?: original.seriesName,
             originalSeriesIndex = original.originalSeriesIndex ?: original.seriesIndex,
             originalDescription = original.originalDescription ?: original.description,
+            coverImagePath = updated.coverImagePath ?: original.coverImagePath,
             fileSize = file.length(),
             fileContentModifiedTimestamp = file.lastModified()
         )
@@ -3547,7 +3606,15 @@ internal fun EpistemeDesktopApp(
                                 initialPageIndex = book.lastPageIndex ?: 0,
                                 initialLocator = book.readerPosition,
                                 bookmarks = book.readerBookmarks,
-                                highlights = book.readerHighlights
+                                highlights = book.readerHighlights,
+                                paginationMode = if (
+                                    restoredSettings.readingMode == ReaderReadingMode.PAGINATED &&
+                                    book.readerPosition?.chapterIndex != null
+                                ) {
+                                    ReaderPaginationMode.ANCHOR_CHAPTER_ONLY
+                                } else {
+                                    ReaderPaginationMode.FULL
+                                }
                             )
                             logDesktopReaderOpenTrace {
                                 opening.openTracePrefix("desktop_session_create_done") +
@@ -4045,7 +4112,8 @@ internal fun EpistemeDesktopApp(
                     { showAiByokSettingsDialog = true }
                 } else {
                     null
-                }
+                },
+                onDevToolsRequested = { showDesktopDevToolsDialog = true }
             ) { tab ->
                 when (tab) {
                         SharedAppTab.SETTINGS -> SharedSettingsHub(
@@ -4187,6 +4255,7 @@ internal fun EpistemeDesktopApp(
                             onSelect = { id -> updateState(state.reduce(LibraryAction.BookSelectionToggled(id))) },
                             onClearSelection = { updateState(state.reduce(LibraryAction.SelectionCleared)) },
                             onRemoveSelected = ::removeSelectedBooks,
+                            onExportAnnotations = { annotationExportDialogFor = it },
                             onShowBookInfo = {
                                 bookInfoInitiallyEditing = false
                                 bookInfoDialogFor = it
@@ -4204,6 +4273,7 @@ internal fun EpistemeDesktopApp(
                             onCreateSmartShelf = { showCreateSmartShelfDialog = true },
                             onRenameShelf = { shelfToRename = it },
                             onDeleteShelf = { shelfToDelete = it },
+                            onDeleteTag = { tagToDelete = it },
                             onRemoveFolder = { folderToRemove = it },
                             onTagSelectedBooks = { showTagSelectionDialog = true },
                             onAddSelectedBooksToShelf = {
@@ -4237,6 +4307,7 @@ internal fun EpistemeDesktopApp(
                             onSelect = { id -> updateState(state.reduce(LibraryAction.BookSelectionToggled(id))) },
                             onClearSelection = { updateState(state.reduce(LibraryAction.SelectionCleared)) },
                             onRemoveSelected = ::removeSelectedBooks,
+                            onExportAnnotations = { annotationExportDialogFor = it },
                             onShowBookInfo = {
                                 bookInfoInitiallyEditing = false
                                 bookInfoDialogFor = it
@@ -4254,6 +4325,7 @@ internal fun EpistemeDesktopApp(
                             onCreateSmartShelf = { showCreateSmartShelfDialog = true },
                             onRenameShelf = { shelfToRename = it },
                             onDeleteShelf = { shelfToDelete = it },
+                            onDeleteTag = { tagToDelete = it },
                             onRemoveFolder = { folderToRemove = it },
                             onTagSelectedBooks = { showTagSelectionDialog = true },
                             onAddSelectedBooksToShelf = {
@@ -4624,6 +4696,77 @@ internal fun EpistemeDesktopApp(
                                         clearReaderHubSummary(readerWindow.id)
                                         clearReaderHubRecap(readerWindow.id)
                                     }
+                                    LaunchedEffect(
+                                        readerWindow.id,
+                                        content.session.reader.book.id,
+                                        content.session.reader.settings.readingMode,
+                                        content.session.reader.currentPage?.chapterIndex
+                                    ) {
+                                        val chapterIndex = content.session.reader.currentPage?.chapterIndex
+                                            ?: content.session.navigationLocator?.chapterIndex
+                                            ?: return@LaunchedEffect
+                                        val readerFile = content.book.path
+                                            ?.takeIf { it.isNotBlank() }
+                                            ?.let(::File)
+                                            ?.takeIf { it.isFile }
+                                            ?: return@LaunchedEffect
+                                        if (
+                                            content.book.type != FileType.EPUB ||
+                                            content.session.reader.settings.readingMode != ReaderReadingMode.VERTICAL ||
+                                            content.session.reader.book.chapters.getOrNull(chapterIndex)?.htmlContent?.isNotBlank() == true
+                                        ) {
+                                            return@LaunchedEffect
+                                        }
+                                        val preparedRange =
+                                            (chapterIndex - DesktopVerticalInitialPreparedHtmlChapterRadius).coerceAtLeast(0)..
+                                                (chapterIndex + DesktopVerticalInitialPreparedHtmlChapterRadius)
+                                        val preparedBook = withContext(Dispatchers.IO) {
+                                            SharedJvmBookLoader.prepareEpubHtmlChapters(
+                                                file = readerFile,
+                                                book = content.session.reader.book,
+                                                chapterRange = preparedRange
+                                            )
+                                        }
+                                        if (preparedBook == content.session.reader.book) return@LaunchedEffect
+                                        updateTextReaderWindow(readerWindow.id) { current ->
+                                            val currentSession = current.session
+                                            if (
+                                                current.book.id != content.book.id ||
+                                                currentSession.reader.book.id != content.session.reader.book.id
+                                            ) {
+                                                current
+                                            } else {
+                                                val mergedBook = currentSession.reader.book.copy(
+                                                    chapters = currentSession.reader.book.chapters.mapIndexed { index, chapter ->
+                                                        preparedBook.chapters.getOrNull(index)
+                                                            ?.takeIf { it.htmlContent.isNotBlank() }
+                                                            ?.let { preparedChapter ->
+                                                                chapter.copy(
+                                                                    htmlContent = preparedChapter.htmlContent,
+                                                                    baseHref = preparedChapter.baseHref ?: chapter.baseHref
+                                                                )
+                                                            }
+                                                            ?: chapter
+                                                    },
+                                                    css = if (currentSession.reader.book.css.isEmpty()) {
+                                                        preparedBook.css
+                                                    } else {
+                                                        currentSession.reader.book.css
+                                                    },
+                                                    tableOfContents = if (currentSession.reader.book.tableOfContents.isEmpty()) {
+                                                        preparedBook.tableOfContents
+                                                    } else {
+                                                        currentSession.reader.book.tableOfContents
+                                                    }
+                                                )
+                                                current.copy(
+                                                    session = currentSession.copy(
+                                                        reader = currentSession.reader.copy(book = mergedBook)
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
                                     DesktopReaderScreen(
                                         session = content.session,
                                         readerEngine = readerEngine,
@@ -4788,6 +4931,29 @@ internal fun EpistemeDesktopApp(
                 )
             }
 
+        annotationExportDialogFor?.let { book ->
+            AlertDialog(
+                onDismissRequest = { annotationExportDialogFor = null },
+                title = { Text(readerString("action_export_annotations", "Export annotations")) },
+                text = { Text(book.cardTitle()) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        annotationExportDialogFor = null
+                        exportDesktopAnnotations(book, AnnotationExportFormat.MARKDOWN)
+                    }) {
+                        Text("Markdown (.md)")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        annotationExportDialogFor = null
+                        exportDesktopAnnotations(book, AnnotationExportFormat.TEXT)
+                    }) {
+                        Text("Text (.txt)")
+                    }
+                }
+            )
+        }
         if (showAiByokSettingsDialog && desktopAiKeySettingsAvailable) {
             DesktopAiByokSettingsDialog(
                 settings = aiByokSettings,
@@ -4840,6 +5006,16 @@ internal fun EpistemeDesktopApp(
                     clearDesktopBookCache()
                     showClearBookCacheDialog = false
                 }
+            )
+        }
+
+        if (showDesktopDevToolsDialog) {
+            DesktopDevToolsDialog(
+                onClearBookCache = {
+                    showDesktopDevToolsDialog = false
+                    showClearBookCacheDialog = true
+                },
+                onDismiss = { showDesktopDevToolsDialog = false }
             )
         }
 
@@ -4904,6 +5080,18 @@ internal fun EpistemeDesktopApp(
             )
         }
 
+        tagToDelete?.let { tagShelf ->
+            SharedConfirmDialog(
+                title = readerString("menu_delete_tag", "Delete tag"),
+                body = readerString("desktop_delete_tag_desc", "Delete tag \"%1\$s\"? It will be removed from every book.", tagShelf.name),
+                confirmLabel = readerString("action_delete", "Delete"),
+                onDismiss = { tagToDelete = null },
+                onConfirm = {
+                    deleteTag(tagShelf)
+                    tagToDelete = null
+                }
+            )
+        }
         folderToRemove?.let { folder ->
             SharedConfirmDialog(
                 title = readerString("menu_remove_folder", "Remove folder"),
@@ -4983,6 +5171,7 @@ internal fun EpistemeDesktopApp(
                 canEditEmbeddedMetadata = canEditEmbeddedMetadata,
                 canRenameDisplayName = canRenameDisplayName,
                 canRestoreEmbeddedMetadata = canEditEmbeddedMetadata,
+                onChooseCover = { chooseCoverImageFile()?.absolutePath },
                 onDismiss = {
                     bookInfoInitiallyEditing = false
                     bookInfoDialogFor = null
@@ -4993,7 +5182,7 @@ internal fun EpistemeDesktopApp(
                     bookInfoDialogFor = null
                 },
                 onRestore = { restored ->
-                    updateBookMetadata(restored)
+                    updateBookMetadata(restored.copy(coverImagePath = null))
                     bookInfoInitiallyEditing = false
                     bookInfoDialogFor = null
                 }
@@ -5026,6 +5215,35 @@ private fun DesktopFeatureNoticeDialog(
             }
         } else {
             null
+        }
+    )
+}
+
+@Composable
+private fun DesktopDevToolsDialog(
+    onClearBookCache: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(readerString("desktop_dev_tools", "Dev tools")) },
+        text = {
+            Text(
+                readerString(
+                    "desktop_dev_tools_desc",
+                    "Maintenance actions for debugging desktop reader behavior."
+                )
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onClearBookCache) {
+                Text(readerString("options_clear_book_cache", "Clear book cache"))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(readerString("action_cancel", "Cancel"))
+            }
         }
     )
 }

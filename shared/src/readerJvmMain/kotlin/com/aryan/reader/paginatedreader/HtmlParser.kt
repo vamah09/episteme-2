@@ -71,6 +71,7 @@ private val semanticBlockDescendantTags = setOf(
     "main"
 )
 private val forcedStandaloneSemanticTags = setOf("img", "svg", "math-placeholder", "hr", "table")
+private val nonRenderableHtmlTags = setOf("script", "style", "noscript", "template")
 
 interface HtmlResourceResolver {
     fun resolvePath(chapterAbsPath: String, extractionBasePath: String, src: String): String?
@@ -165,6 +166,10 @@ fun htmlToSemanticBlocks(
     ).parse(html)
 }
 
+private fun OptimizedCssRules.sortedForCascade(): List<CssRule> {
+    return toFlatList().sortedWith(compareBy<CssRule> { it.selector.specificity }.thenBy { it.sourceOrder })
+}
+
 /**
  * A stateful parser that holds the context for a single HTML-to-SemanticBlock conversion.
  */
@@ -184,6 +189,7 @@ private class SemanticHtmlParser(
 ) {
     private val semanticBlockDescendantCache = IdentityHashMap<Element, Boolean>()
     private var combinedRules: OptimizedCssRules = cssRules
+    private var sortedRules: List<CssRule> = cssRules.sortedForCascade()
     private val currentFontFamilyMap: MutableMap<String, FontFamily> = fontFamilyMap.toMutableMap()
     private var nextBlockIndex = 0
 
@@ -210,7 +216,10 @@ private class SemanticHtmlParser(
                 }
             }
             combinedRules = combinedRules.merge(inlineParseResult.rules)
+            sortedRules = combinedRules.sortedForCascade()
         }
+
+        document.select("script, style, noscript, template").remove()
 
         val body = document.body()
         return parseContainer(body, getElementStyle(body).withResolvedFontFamily())
@@ -266,6 +275,7 @@ private class SemanticHtmlParser(
 
     private fun Element.isEffectivelySemanticBlock(): Boolean {
         val tagName = tagName().lowercase()
+        if (tagName in nonRenderableHtmlTags) return false
         return isBlock ||
                 tagName in forcedStandaloneSemanticTags ||
                 (!isBlock && hasSemanticBlockDescendant())
@@ -304,6 +314,7 @@ private class SemanticHtmlParser(
     }
 
     private fun CssRule.matchesElement(element: Element, pseudoElement: String? = null): Boolean {
+        if (element.tagName().lowercase() in nonRenderableHtmlTags) return false
         if (this.pseudoElement != pseudoElement) return false
         if (unsupportedPseudoElementRegex.containsMatchIn(selector.selector)) return false
         return try {
@@ -315,12 +326,7 @@ private class SemanticHtmlParser(
     }
 
     private fun rulesForElement(element: Element, pseudoElement: String? = null): List<CssRule> {
-        val rules = combinedRules.toFlatList()
-        return rules
-            .asSequence()
-            .filter { it.matchesElement(element, pseudoElement) }
-            .sortedWith(compareBy<CssRule> { it.selector.specificity }.thenBy { it.sourceOrder })
-            .toList()
+        return sortedRules.filter { it.matchesElement(element, pseudoElement) }
     }
 
     private fun getElementStyle(element: Element, inheritedCustomProperties: Map<String, String> = emptyMap()): CssStyle {
@@ -816,6 +822,7 @@ private class SemanticHtmlParser(
                     if (node.tagName().lowercase() == "br") {
                         appendText("\n"); return
                     }
+                    if (node.tagName().lowercase() in nonRenderableHtmlTags) return
                     val currentElementStyle = getElementStyle(node, inheritedStyle.customProperties)
                     val newStyle = inheritedStyle.merge(currentElementStyle).withResolvedFontFamily()
                     if (newStyle.display == "none") return

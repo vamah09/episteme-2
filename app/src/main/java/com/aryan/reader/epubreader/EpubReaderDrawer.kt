@@ -27,6 +27,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -58,9 +60,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -70,6 +74,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -85,12 +90,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -101,6 +111,7 @@ import com.aryan.reader.R
 import com.aryan.reader.RenderMode
 import com.aryan.reader.epub.EpubChapter
 import com.aryan.reader.epub.EpubTocEntry
+import com.aryan.reader.shared.filterReaderTocEntries
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -232,9 +243,9 @@ fun EpubReaderDrawerSheet(
     onRenameBookmark: (Bookmark, String) -> Unit,
     onDeleteHighlight: (UserHighlight) -> Unit,
     onEditNote: (UserHighlight) -> Unit,
-    activeHighlightPalette: List<HighlightColor>,
+    activeHighlightPalette: List<Int>,
     onOpenPaletteManager: () -> Unit,
-    onHighlightColorChange: (UserHighlight, HighlightColor) -> Unit
+    onHighlightColorChange: (UserHighlight, Int) -> Unit
 ) {
     ModalDrawerSheet(
         modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars)
@@ -243,6 +254,7 @@ fun EpubReaderDrawerSheet(
         val drawerScope = rememberCoroutineScope()
 
         Column(modifier = Modifier.fillMaxSize()) {
+
             ScrollableTabRow(
                 selectedTabIndex = drawerPagerState.currentPage,
                 edgePadding = 0.dp,
@@ -326,6 +338,7 @@ private fun ChaptersList(
     onNavigateToChapter: (Int) -> Unit
 ) {
     val listState = rememberLazyListState()
+    val focusManager = LocalFocusManager.current
 
     val effectiveToc = remember(tocEntries, chapters) {
         tocEntries.ifEmpty {
@@ -357,34 +370,50 @@ private fun ChaptersList(
     var expandedEntryIndices by rememberSaveable(effectiveToc) {
         mutableStateOf(allParentIndices)
     }
+    var tocSearchQuery by rememberSaveable(effectiveToc) { mutableStateOf("") }
+    var searchFieldCanFocus by remember(effectiveToc) { mutableStateOf(false) }
+    val isSearchingToc = tocSearchQuery.isNotBlank()
 
-    val visibleItemInfo by remember(effectiveToc) {
-        derivedStateOf {
-            val result = mutableListOf<Pair<Int, EpubTocEntry>>()
-            val visibilityStack = BooleanArray(50) { false }
-            visibilityStack[0] = true
-
-            for (i in effectiveToc.indices) {
-                val entry = effectiveToc[i]
-                val depth = entry.depth.coerceIn(0, 49)
-
-                if (visibilityStack[depth]) {
-                    result.add(i to entry)
-
-                    val isExpanded = expandedEntryIndices.contains(i)
-                    if (depth + 1 < visibilityStack.size) {
-                        visibilityStack[depth + 1] = isExpanded
-                    }
-                } else {
-                    if (depth + 1 < visibilityStack.size) {
-                        visibilityStack[depth + 1] = false
-                    }
-                }
-            }
-            result
-        }
+    LaunchedEffect(effectiveToc) {
+        searchFieldCanFocus = false
+        focusManager.clearFocus(force = true)
     }
 
+    val visibleItemInfo by remember(effectiveToc, tocSearchQuery) {
+        derivedStateOf {
+            if (tocSearchQuery.isNotBlank()) {
+                filterReaderTocEntries(
+                    entries = effectiveToc,
+                    query = tocSearchQuery,
+                    labelOf = { it.label },
+                    depthOf = { it.depth }
+                ).map { it.originalIndex to it.entry }
+            } else {
+                val result = mutableListOf<Pair<Int, EpubTocEntry>>()
+                val visibilityStack = BooleanArray(50) { false }
+                visibilityStack[0] = true
+
+                for (i in effectiveToc.indices) {
+                    val entry = effectiveToc[i]
+                    val depth = entry.depth.coerceIn(0, 49)
+
+                    if (visibilityStack[depth]) {
+                        result.add(i to entry)
+
+                        val isExpanded = expandedEntryIndices.contains(i)
+                        if (depth + 1 < visibilityStack.size) {
+                            visibilityStack[depth + 1] = isExpanded
+                        }
+                    } else {
+                        if (depth + 1 < visibilityStack.size) {
+                            visibilityStack[depth + 1] = false
+                        }
+                    }
+                }
+                result
+            }
+        }
+    }
     val coroutineScope = rememberCoroutineScope()
 
     val activeTocEntry = remember(effectiveToc, currentChapterPath, activeFragmentId, firstEntryForCurrentChapter) {
@@ -429,6 +458,47 @@ private fun ChaptersList(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = tocSearchQuery,
+            onValueChange = { tocSearchQuery = it },
+            singleLine = true,
+            leadingIcon = {
+                Icon(
+                    Icons.Default.Search,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp)
+                )
+            },
+            trailingIcon = if (tocSearchQuery.isNotEmpty()) {
+                {
+                    IconButton(
+                        onClick = { tocSearchQuery = "" },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = stringResource(R.string.tooltip_clear_search),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            } else null,
+            placeholder = { Text(stringResource(R.string.search_chapters_placeholder)) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .pointerInput(effectiveToc) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        searchFieldCanFocus = true
+                    }
+                }
+                .focusProperties { canFocus = searchFieldCanFocus }
+                .onFocusChanged { state ->
+                    if (!state.isFocused) searchFieldCanFocus = false
+                }
+        )
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -449,7 +519,20 @@ private fun ChaptersList(
         HorizontalDivider()
 
         Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            LazyColumn(
+            if (visibleItemInfo.isEmpty() && isSearchingToc) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = stringResource(R.string.no_chapters_matching, tocSearchQuery.trim()),
+                        style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .fillMaxHeight()
@@ -491,6 +574,7 @@ private fun ChaptersList(
                         }
                     )
                 }
+            }
             }
 
             VerticalScrollbar(
@@ -667,8 +751,8 @@ private fun BookmarksList(
         }
 
         showRenameBookmarkDialog?.let { bookmarkToRename ->
-            var newTitle by remember { mutableStateOf("") }
             val currentName = bookmarkToRename.label?.takeIf { it.isNotBlank() } ?: bookmarkToRename.snippet
+            var newTitle by remember(bookmarkToRename) { mutableStateOf(currentName) }
 
             AlertDialog(
                 onDismissRequest = { showRenameBookmarkDialog = null },
@@ -678,15 +762,6 @@ private fun BookmarksList(
                         value = newTitle,
                         onValueChange = { newTitle = it },
                         label = { Text(stringResource(R.string.label_new_name)) },
-                        placeholder = {
-                            Text(
-                                text = currentName,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
-                        },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -883,9 +958,9 @@ private fun HighlightsList(
     onNavigateToHighlight: (UserHighlight) -> Unit,
     onDeleteHighlight: (UserHighlight) -> Unit,
     onEditNote: (UserHighlight) -> Unit,
-    activeHighlightPalette: List<HighlightColor>,
+    activeHighlightPalette: List<Int>,
     onOpenPaletteManager: () -> Unit,
-    onHighlightColorChange: (UserHighlight, HighlightColor) -> Unit
+    onHighlightColorChange: (UserHighlight, Int) -> Unit
 ) {
     if (userHighlights.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
@@ -947,7 +1022,7 @@ private fun HighlightsList(
                                         Box(
                                             modifier = Modifier
                                                 .size(12.dp)
-                                                .background(highlight.color.color, CircleShape)
+                                                .background(highlight.effectiveColor, CircleShape)
                                         )
                                         Spacer(Modifier.width(8.dp))
                                         Text(
@@ -988,7 +1063,7 @@ private fun HighlightsList(
                                     ) {
                                         HighlightColorRow(
                                             activeHighlightPalette = activeHighlightPalette,
-                                            selectedColor = highlight.color,
+                                            selectedColorArgb = highlight.colorArgb ?: highlight.color.color.toArgb(),
                                             onColorSelect = { color ->
                                                 onHighlightColorChange(highlight, color)
                                                 highlightMenuExpandedFor = null

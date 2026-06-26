@@ -15,6 +15,7 @@ import com.aryan.reader.paginatedreader.SemanticWrappingBlock
 import com.aryan.reader.paginatedreader.BorderStyle
 import com.aryan.reader.paginatedreader.CssStyle
 import com.aryan.reader.shared.HighlightColor
+import com.aryan.reader.shared.HighlightStyle
 import com.aryan.reader.shared.ReaderHighlightPalette
 import com.aryan.reader.shared.ReaderTexture
 import com.aryan.reader.shared.UserHighlight
@@ -2892,9 +2893,18 @@ object ReaderHtmlDocumentBuilder {
                     if (offsets.start === null || offsets.end === null) return false;
                     return Math.abs(offsets.start - startOffset) <= 1 && Math.abs(offsets.end - endOffset) <= 1;
                   }
-                  function createReaderHighlightMarker(highlightId, colorId, startOffset, endOffset) {
+                  function readerHighlightCssColor(colorArgb) {
+                    if (colorArgb === undefined || colorArgb === null) return null;
+                    var value = Number(colorArgb);
+                    if (!Number.isFinite(value)) return null;
+                    var rgb = (value >>> 0) & 0xFFFFFF;
+                    return '#' + rgb.toString(16).padStart(6, '0').toUpperCase();
+                  }
+                  function createReaderHighlightMarker(highlightId, colorId, startOffset, endOffset, colorArgb) {
                     var marker = document.createElement('span');
                     marker.className = 'reader-user-highlight user-highlight-' + (colorId || 'yellow');
+                    var cssColor = readerHighlightCssColor(colorArgb);
+                    if (cssColor) marker.style.setProperty('background-color', cssColor, 'important');
                     if (highlightId) marker.setAttribute('data-reader-highlight-id', highlightId);
                     if (startOffset !== undefined && startOffset !== null) {
                       marker.setAttribute('data-reader-start-offset', String(startOffset));
@@ -3372,7 +3382,7 @@ object ReaderHtmlDocumentBuilder {
                         return;
                       }
                       wrapRangeTextSegments(range, function () {
-                        var marker = createReaderHighlightMarker(highlight.id, highlight.colorId || 'yellow', segmentStart, segmentEnd);
+                        var marker = createReaderHighlightMarker(highlight.id, highlight.colorId || 'yellow', segmentStart, segmentEnd, highlight.colorArgb);
                         marker.setAttribute('data-cfi', sourceCfi || highlight.cfi || ('desktop:' + chapterIndex + ':' + startOffset + ':' + endOffset));
                         return marker;
                       });
@@ -3432,7 +3442,7 @@ object ReaderHtmlDocumentBuilder {
                       return false;
                     }
                     wrapRangeTextSegments(range, function () {
-                      var marker = createReaderHighlightMarker(highlight.id, highlight.colorId || 'yellow', null, null);
+                      var marker = createReaderHighlightMarker(highlight.id, highlight.colorId || 'yellow', null, null, highlight.colorArgb);
                       marker.setAttribute('data-cfi', locator.cfi || highlight.cfi || '');
                       return marker;
                     });
@@ -3708,7 +3718,7 @@ object ReaderHtmlDocumentBuilder {
                         var wrappedSingle = false;
                         try {
                           wrappedSingle = wrapRangeTextSegments(localRange, function () {
-                            var marker = createReaderHighlightMarker(null, colorId || 'yellow', payload.locator.startOffset, payload.locator.endOffset);
+                            var marker = createReaderHighlightMarker(null, colorId || 'yellow', payload.locator.startOffset, payload.locator.endOffset, null);
                             marker.setAttribute('data-cfi', payload.cfi);
                             return marker;
                           });
@@ -3723,7 +3733,7 @@ object ReaderHtmlDocumentBuilder {
                         segments.forEach(function (segment, index) {
                           var payload = payloads[index];
                           var wrappedSegment = wrapRangeTextSegments(segment.range, function () {
-                            var marker = createReaderHighlightMarker(null, colorId || 'yellow', segment.startOffset, segment.endOffset);
+                            var marker = createReaderHighlightMarker(null, colorId || 'yellow', segment.startOffset, segment.endOffset, null);
                             marker.setAttribute('data-cfi', payload.cfi);
                             return marker;
                           });
@@ -3897,11 +3907,33 @@ object ReaderHtmlDocumentBuilder {
     }
 
     private fun SharedEpubChapter.toHtml(searchQuery: String, searchOptions: ReaderSearchOptions): String {
+        val normalizedText = normalizedReaderText()
         semanticBlocks.takeIf { it.isNotEmpty() }?.let { blocks ->
+            val prewrapBlocks = blocks.flattenHtmlSemanticBlocks()
+                .filterIsInstance<SemanticTextBlock>()
+                .count { it.text.needsPreservedWhitespace() }
+            logSharedReaderDiagnostic(TxtFormatTraceTag) {
+                "event=shared_html_chapter_route route=semantic chapter=\"${title.txtFormatTracePreview()}\" " +
+                    "plainChars=${plainText.length} normalizedChars=${normalizedText.length} blocks=${blocks.size} prewrapBlocks=$prewrapBlocks " +
+                    "htmlChars=${htmlContent.length} preview=\"${normalizedText.txtFormatTracePreview()}\""
+            }
             return blocks.joinToString("") { it.toHtml(searchQuery, searchOptions) }
         }
-        htmlContent.takeIf { it.isNotBlank() }?.let { return it }
-        return normalizedReaderText().textToParagraphHtml(searchQuery, searchOptions)
+        htmlContent.takeIf { it.isNotBlank() }?.let { html ->
+            logSharedReaderDiagnostic(TxtFormatTraceTag) {
+                "event=shared_html_chapter_route route=htmlContent chapter=\"${title.txtFormatTracePreview()}\" " +
+                    "plainChars=${plainText.length} normalizedChars=${normalizedText.length} htmlChars=${html.length} " +
+                    "containsPreWrap=${html.contains("white-space: pre-wrap") || html.contains("white-space:pre-wrap")} " +
+                    "htmlPreview=\"${html.txtFormatTracePreview()}\" plainPreview=\"${normalizedText.txtFormatTracePreview()}\""
+            }
+            return html
+        }
+        logSharedReaderDiagnostic(TxtFormatTraceTag) {
+            "event=shared_html_chapter_route route=plainFallback chapter=\"${title.txtFormatTracePreview()}\" " +
+                "plainChars=${plainText.length} normalizedChars=${normalizedText.length} " +
+                "needsWhitespace=${normalizedText.needsPreservedWhitespace()} preview=\"${normalizedText.txtFormatTracePreview()}\""
+        }
+        return normalizedText.textToParagraphHtml(searchQuery, searchOptions)
     }
 
     private fun List<SemanticBlock>.blocksForPage(page: ReaderPage): List<SemanticBlock> {
@@ -4063,9 +4095,9 @@ object ReaderHtmlDocumentBuilder {
 
     private fun SemanticBlock.toHtml(searchQuery: String, searchOptions: ReaderSearchOptions): String {
         return when (this) {
-            is SemanticHeader -> "<h${level.coerceIn(1, 6)}${textOffsetAttributes()}${styleAttribute()}>${textHtml(searchQuery, searchOptions)}</h${level.coerceIn(1, 6)}>"
-            is SemanticParagraph -> "<p${textOffsetAttributes()}${styleAttribute()}>${textHtml(searchQuery, searchOptions)}</p>"
-            is SemanticListItem -> "<li${textOffsetAttributes()}${listItemStyleAttribute()}>${textHtml(searchQuery, searchOptions)}</li>"
+            is SemanticHeader -> "<h${level.coerceIn(1, 6)}${textOffsetAttributes()}${styleAttribute(preservedWhitespaceStyle())}>${textHtml(searchQuery, searchOptions)}</h${level.coerceIn(1, 6)}>"
+            is SemanticParagraph -> "<p${textOffsetAttributes()}${styleAttribute(preservedWhitespaceStyle())}>${textHtml(searchQuery, searchOptions)}</p>"
+            is SemanticListItem -> "<li${textOffsetAttributes()}${listItemStyleAttribute(preservedWhitespaceStyle())}>${textHtml(searchQuery, searchOptions)}</li>"
             is SemanticList -> {
                 val tag = if (isOrdered) "ol" else "ul"
                 "<$tag${styleAttribute()}>${items.joinToString("") { it.toHtml(searchQuery, searchOptions) }}</$tag>"
@@ -4081,7 +4113,7 @@ object ReaderHtmlDocumentBuilder {
             }
             is SemanticFlexContainer -> children.joinToString("", "<div${styleAttribute()}>", "</div>") { it.toHtml(searchQuery, searchOptions) }
             is SemanticWrappingBlock -> floatedImage.toHtml(searchQuery, searchOptions) + paragraphsToWrap.joinToString("") { it.toHtml(searchQuery, searchOptions) }
-            is SemanticTextBlock -> "<p${textOffsetAttributes()}${styleAttribute()}>${textHtml(searchQuery, searchOptions)}</p>"
+            is SemanticTextBlock -> "<p${textOffsetAttributes()}${styleAttribute(preservedWhitespaceStyle())}>${textHtml(searchQuery, searchOptions)}</p>"
         }
     }
 
@@ -4090,13 +4122,37 @@ object ReaderHtmlDocumentBuilder {
         searchOptions: ReaderSearchOptions,
         baseOffset: Int = 0
     ): String {
-        return paragraphSegments()
+        val segments = paragraphSegments()
+        logSharedReaderDiagnostic(TxtFormatTraceTag) {
+            "event=shared_plain_fallback_segments baseOffset=$baseOffset chars=$length segments=${segments.size} " +
+                "prewrapSegments=${segments.count { it.text.needsPreservedWhitespace() }} " +
+                "firstSegment=\"${segments.firstOrNull()?.text.orEmpty().txtFormatTracePreview()}\""
+        }
+        return segments
             .joinToString("") { paragraph ->
                 val start = baseOffset + paragraph.startOffset
                 val end = start + paragraph.text.length
-                """<p data-reader-text-start="$start" data-reader-text-end="$end">${paragraph.text.highlightAndEscape(searchQuery, searchOptions)}</p>"""
+                val whitespaceStyle = if (paragraph.text.needsPreservedWhitespace()) {
+                    """ style="white-space:pre-wrap"""
+                } else {
+                    ""
+                }
+                """<p data-reader-text-start="$start" data-reader-text-end="$end"$whitespaceStyle>${paragraph.text.highlightAndEscape(searchQuery, searchOptions)}</p>"""
             }
             .ifBlank { "<p></p>" }
+    }
+
+    private fun String.needsPreservedWhitespace(): Boolean {
+        return any { it == '\n' || it == '\t' } || contains(Regex(" {2,}"))
+    }
+
+    private fun String.txtFormatTracePreview(maxLength: Int = 220): String {
+        return replace("\\", "\\\\")
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+            .let { if (it.length <= maxLength) it else it.take(maxLength) + "..." }
+            .replace("\"", "\\\"")
     }
 
     private fun String.paragraphSegments(): List<TextSegment> {
@@ -4238,12 +4294,17 @@ object ReaderHtmlDocumentBuilder {
         return style.toStyleAttribute(extra)
     }
 
-    private fun SemanticListItem.listItemStyleAttribute(): String {
+    private fun SemanticTextBlock.preservedWhitespaceStyle(): String? {
+        return if (text.needsPreservedWhitespace()) "white-space:pre-wrap" else null
+    }
+
+    private fun SemanticListItem.listItemStyleAttribute(extra: String? = null): String {
         val markerStyle = itemMarkerImage
             ?.takeIf { it.isNotBlank() }
             ?.takeIf { style.blockStyle.listStyleImage.isNullOrBlank() }
             ?.let { "list-style-image:url('${it.escapeHtml()}')" }
-        return style.toStyleAttribute(markerStyle)
+        val extras = listOfNotNull(markerStyle, extra).joinToString(";").takeIf { it.isNotBlank() }
+        return style.toStyleAttribute(extras)
     }
 
     private fun CssStyle.toStyleAttribute(extra: String? = null): String {
@@ -4609,7 +4670,7 @@ object ReaderHtmlDocumentBuilder {
             if (startIndex >= endIndex || endIndex > html.length) return@fold html
             val markedText = html.substring(startIndex, endIndex)
             if (markedText.visibleHtmlText().isBlank()) return@fold html
-            val markerStart = """<span class="reader-user-highlight ${highlight.color.cssClass}" data-reader-highlight-id="${highlight.id.escapeHtml()}" data-cfi="${highlight.cfi.escapeHtml()}" data-reader-start-offset="${highlight.absoluteStart}" data-reader-end-offset="${highlight.absoluteEnd}">"""
+            val markerStart = """<span class="reader-user-highlight ${highlight.color.cssClass}"${highlight.highlightAttributes()} data-reader-highlight-id="${highlight.id.escapeHtml()}" data-cfi="${highlight.cfi.escapeHtml()}" data-reader-start-offset="${highlight.absoluteStart}" data-reader-end-offset="${highlight.absoluteEnd}">"""
             html.replaceRange(startIndex, endIndex, markedText.wrapVisibleHtmlText(markerStart, "</span>"))
         }
 
@@ -4619,9 +4680,39 @@ object ReaderHtmlDocumentBuilder {
             .fold(rangedHtml) { html, highlight ->
                 val text = highlight.text.trim().takeIf { it.isNotBlank() } ?: return@fold html
                 val escapedText = text.escapeHtml()
-                val markedText = """<span class="reader-user-highlight ${highlight.color.cssClass}" data-reader-highlight-id="${highlight.id.escapeHtml()}" data-cfi="${highlight.cfi.escapeHtml()}">$escapedText</span>"""
+                val markedText = """<span class="reader-user-highlight ${highlight.color.cssClass}"${highlight.highlightAttributes()} data-reader-highlight-id="${highlight.id.escapeHtml()}" data-cfi="${highlight.cfi.escapeHtml()}">$escapedText</span>"""
                 html.replaceFirst(escapedText, markedText)
             }
+    }
+
+    private fun RenderedHighlight.highlightAttributes(): String {
+        return highlightAttributes(style, colorArgb)
+    }
+
+    private fun UserHighlight.highlightAttributes(): String {
+        return highlightAttributes(style, colorArgb)
+    }
+
+    private fun highlightAttributes(style: HighlightStyle, colorArgb: Int?): String {
+        val declarations = highlightStyleDeclarations(style, colorArgb)
+        val styleAttribute = declarations.takeIf { it.isNotBlank() }?.let { " style=\"$it\"" }.orEmpty()
+        return "$styleAttribute data-reader-highlight-style=\"${style.id}\""
+    }
+
+    private fun highlightStyleDeclarations(style: HighlightStyle, colorArgb: Int?): String {
+        val rgb = colorArgb?.let { it and 0x00FFFFFF }
+        val colorCss = rgb?.let { "#${it.toString(16).padStart(6, '0').uppercase()}" }
+        return when (style) {
+            HighlightStyle.BACKGROUND -> colorCss?.let { "background-color:$it !important" }.orEmpty()
+            HighlightStyle.UNDERLINE -> highlightLineStyle(colorCss, "underline", "solid")
+            HighlightStyle.WAVY_UNDERLINE -> highlightLineStyle(colorCss, "underline", "wavy")
+            HighlightStyle.STRIKETHROUGH -> highlightLineStyle(colorCss, "line-through", "solid")
+        }
+    }
+
+    private fun highlightLineStyle(colorCss: String?, line: String, decorationStyle: String): String {
+        val colorDeclaration = colorCss?.let { "; text-decoration-color:$it !important" }.orEmpty()
+        return "background-color:transparent !important; text-decoration-line:$line !important; text-decoration-style:$decorationStyle !important$colorDeclaration"
     }
 
     private fun String.wrapVisibleHtmlText(markerStart: String, markerEnd: String): String {
@@ -4878,6 +4969,8 @@ object ReaderHtmlDocumentBuilder {
             id = source.id,
             cfi = cfi,
             color = source.color,
+            colorArgb = source.colorArgb,
+            style = source.style,
             absoluteStart = boundedStart,
             absoluteEnd = boundedEnd,
             relativeStart = boundedStart - contentStartOffset,
@@ -5159,6 +5252,8 @@ object ReaderHtmlDocumentBuilder {
         val id: String,
         val cfi: String,
         val color: HighlightColor,
+        val colorArgb: Int?,
+        val style: HighlightStyle,
         val absoluteStart: Int,
         val absoluteEnd: Int,
         val relativeStart: Int,

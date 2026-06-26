@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -74,7 +75,9 @@ object EpubAnnotationSerializer {
             chapterIndex = chapterIndex,
             cfi = newCfi,
             textQuote = newText
-        )
+        ),
+        newColorArgb: Int? = null,
+        newStyle: HighlightStyle = HighlightStyle.BACKGROUND
     ): String {
         val normalizedLocator = locator.withFallbacks(
             chapterIndex = chapterIndex,
@@ -91,6 +94,8 @@ object EpubAnnotationSerializer {
             currentList[exactMatchIndex] = existing.copy(
                 cfi = newCfi,
                 color = newColor,
+                colorArgb = newColorArgb,
+                style = newStyle,
                 text = newText,
                 locator = existing.locator.copy(cfi = newCfi, textQuote = newText).withFallbacks(
                     chapterIndex = chapterIndex,
@@ -108,6 +113,8 @@ object EpubAnnotationSerializer {
                 text = newText,
                 color = newColor,
                 chapterIndex = chapterIndex,
+                colorArgb = newColorArgb,
+                style = newStyle,
                 note = null,
                 locator = normalizedLocator
             )
@@ -176,6 +183,8 @@ object EpubAnnotationSerializer {
         val colorId = string("colorId")
         val color = HighlightColor.entries.firstOrNull { it.id == colorId } ?: HighlightColor.YELLOW
         val note = string("note")?.takeIf { it.isNotBlank() }
+        val colorArgb = int("colorArgb") ?: long("colorArgb")?.toInt()
+        val style = HighlightStyle.fromId(string("style"))
         return UserHighlight(
             id = string("id")?.takeIf { it.isNotBlank() } ?: stableHighlightId(cfi, chapterIndex),
             cfi = cfi,
@@ -183,6 +192,8 @@ object EpubAnnotationSerializer {
             color = color,
             chapterIndex = chapterIndex,
             note = note,
+            colorArgb = colorArgb,
+            style = style,
             locator = this["locator"]
                 ?.takeUnless { it is JsonNull }
                 ?.asReaderLocatorOrNull()
@@ -222,6 +233,8 @@ object EpubAnnotationSerializer {
                 "cfi" to JsonPrimitive(cfi),
                 "text" to JsonPrimitive(text),
                 "colorId" to JsonPrimitive(color.id),
+                "colorArgb" to (colorArgb?.let { JsonPrimitive(it) } ?: JsonNull),
+                "style" to JsonPrimitive(style.id),
                 "chapterIndex" to JsonPrimitive(chapterIndex),
                 "note" to (note ?: "").asJson(),
                 "locator" to locator.toJsonObject()
@@ -275,6 +288,10 @@ object EpubAnnotationSerializer {
 
     private fun JsonObject.int(name: String): Int? {
         return runCatching { this[name]?.takeUnless { it is JsonNull }?.jsonPrimitive?.intOrNull }.getOrNull()
+    }
+
+    private fun JsonObject.long(name: String): Long? {
+        return runCatching { this[name]?.takeUnless { it is JsonNull }?.jsonPrimitive?.longOrNull }.getOrNull()
     }
 
     private fun JsonElement.contentOrNull(): String? {

@@ -84,6 +84,9 @@ interface RecentFileDao {
     @Query("UPDATE recent_files SET bookmarks = :bookmarksJson, lastModifiedTimestamp = :timestamp WHERE bookId = :bookId")
     suspend fun updateBookmarks(bookId: String, bookmarksJson: String, timestamp: Long)
 
+    @Query("UPDATE recent_files SET customName = :customName, lastModifiedTimestamp = :timestamp WHERE bookId = :bookId")
+    suspend fun updateCustomName(bookId: String, customName: String?, timestamp: Long)
+
     @Query("UPDATE recent_files SET isAvailable = 1, uriString = :uriString, timestamp = :timestamp, lastModifiedTimestamp = :timestamp WHERE bookId = :bookId")
     suspend fun updateBookAvailability(bookId: String, uriString: String, timestamp: Long)
 
@@ -96,7 +99,7 @@ interface RecentFileDao {
         AND isDeleted = 0
         AND (
             (type IN ('PDF', 'EPUB', 'MOBI', 'FB2', 'ODT', 'FODT', 'DOCX') AND folderTextMetadataParsed = 0)
-            OR (type IN ('EPUB', 'MOBI', 'FB2') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
+            OR (type IN ('PDF', 'EPUB', 'TXT', 'MD', 'HTML', 'MOBI', 'FB2', 'CBZ', 'CBR', 'CB7', 'CBT', 'DOCX', 'ODT', 'FODT', 'PPTX') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
         )
         ORDER BY timestamp DESC
         LIMIT :limit
@@ -109,7 +112,7 @@ interface RecentFileDao {
         AND isDeleted = 0
         AND (
             (type IN ('PDF', 'EPUB', 'MOBI', 'FB2', 'ODT', 'FODT', 'DOCX') AND folderTextMetadataParsed = 0)
-            OR (type IN ('EPUB', 'MOBI', 'FB2') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
+            OR (type IN ('PDF', 'EPUB', 'TXT', 'MD', 'HTML', 'MOBI', 'FB2', 'CBZ', 'CBR', 'CB7', 'CBT', 'DOCX', 'ODT', 'FODT', 'PPTX') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
         )
         ORDER BY timestamp DESC
         LIMIT :limit
@@ -122,7 +125,7 @@ interface RecentFileDao {
         AND isDeleted = 0
         AND (
             (type IN ('PDF', 'EPUB', 'MOBI', 'FB2', 'ODT', 'FODT', 'DOCX') AND folderTextMetadataParsed = 0)
-            OR (type IN ('EPUB', 'MOBI', 'FB2') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
+            OR (type IN ('PDF', 'EPUB', 'TXT', 'MD', 'HTML', 'MOBI', 'FB2', 'CBZ', 'CBR', 'CB7', 'CBT', 'DOCX', 'ODT', 'FODT', 'PPTX') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
         )
     """)
     suspend fun countFolderBooksNeedingTextMetadata(): Int
@@ -133,7 +136,7 @@ interface RecentFileDao {
         AND isDeleted = 0
         AND (
             (type IN ('PDF', 'EPUB', 'MOBI', 'FB2', 'ODT', 'FODT', 'DOCX') AND folderTextMetadataParsed = 0)
-            OR (type IN ('EPUB', 'MOBI', 'FB2') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
+            OR (type IN ('PDF', 'EPUB', 'TXT', 'MD', 'HTML', 'MOBI', 'FB2', 'CBZ', 'CBR', 'CB7', 'CBT', 'DOCX', 'ODT', 'FODT', 'PPTX') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
         )
     """)
     suspend fun countFolderBooksNeedingTextMetadata(sourceFolderUri: String): Int
@@ -226,6 +229,7 @@ interface RecentFileDao {
             seriesName = :seriesName,
             seriesIndex = :seriesIndex,
             description = :description,
+            coverImagePath = COALESCE(:coverImagePath, coverImagePath),
             customName = NULL,
             originalTitle = COALESCE(originalTitle, title),
             originalAuthor = COALESCE(originalAuthor, author),
@@ -235,6 +239,7 @@ interface RecentFileDao {
             fileSize = CASE WHEN :fileSize > 0 THEN :fileSize ELSE fileSize END,
             fileContentModifiedTimestamp = CASE WHEN :fileContentModifiedTimestamp > 0 THEN :fileContentModifiedTimestamp ELSE fileContentModifiedTimestamp END,
             folderTextMetadataParsed = 1,
+            folderCoverMetadataParsed = CASE WHEN :coverImagePath IS NOT NULL THEN 1 ELSE folderCoverMetadataParsed END,
             lastModifiedTimestamp = :timestamp
         WHERE bookId = :bookId
     """)
@@ -245,6 +250,7 @@ interface RecentFileDao {
         seriesName: String?,
         seriesIndex: Double?,
         description: String?,
+        coverImagePath: String?,
         fileSize: Long,
         fileContentModifiedTimestamp: Long,
         timestamp: Long
@@ -258,15 +264,18 @@ interface RecentFileDao {
             seriesName = originalSeriesName,
             seriesIndex = originalSeriesIndex,
             description = originalDescription,
+            coverImagePath = COALESCE(:coverImagePath, coverImagePath),
             customName = NULL,
             fileSize = CASE WHEN :fileSize > 0 THEN :fileSize ELSE fileSize END,
             fileContentModifiedTimestamp = CASE WHEN :fileContentModifiedTimestamp > 0 THEN :fileContentModifiedTimestamp ELSE fileContentModifiedTimestamp END,
             folderTextMetadataParsed = 1,
+            folderCoverMetadataParsed = CASE WHEN :coverImagePath IS NOT NULL THEN 1 ELSE folderCoverMetadataParsed END,
             lastModifiedTimestamp = :timestamp
         WHERE bookId = :bookId
     """)
     suspend fun restoreOriginalMetadata(
         bookId: String,
+        coverImagePath: String?,
         fileSize: Long,
         fileContentModifiedTimestamp: Long,
         timestamp: Long

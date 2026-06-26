@@ -40,6 +40,66 @@ class ReaderHtmlDocumentBuilderTest {
     }
 
     @Test
+    fun `plain text fallback preserves txt line breaks and spacing`() {
+        val text = """
+            [ID]          72694621
+            [Title]       DAMN.
+            [Artists]     Kendrick Lamar
+            [ReleaseDate] 2017-04-14
+            [SongNum]     14
+            [Duration]    3294
+
+            ===========CD 1=============
+            [1]     BLOOD.
+            [2]     DNA.
+        """.trimIndent()
+
+        val html = ReaderHtmlDocumentBuilder.pageDocument(
+            book = repeatedWordBook(text),
+            page = ReaderPage(0, 0, "One", text, 0, text.length),
+            settings = ReaderSettings()
+        )
+
+        assertEquals(2, Regex("white-space:pre-wrap").findAll(html).count())
+        assertTrue(html.contains("[ID]          72694621\n[Title]       DAMN."))
+        assertTrue(html.contains("===========CD 1=============\n[1]     BLOOD.\n[2]     DNA."))
+
+        val semanticHtml = ReaderHtmlDocumentBuilder.pageDocument(
+            book = repeatedWordBook(text),
+            page = ReaderPage(
+                pageIndex = 0,
+                chapterIndex = 0,
+                chapterTitle = "One",
+                text = text,
+                startOffset = 0,
+                endOffset = text.length,
+                semanticBlocks = listOf(
+                    SemanticParagraph(
+                        text = text.substringBefore("\n\n"),
+                        spans = emptyList(),
+                        style = CssStyle(),
+                        elementId = null,
+                        cfi = null,
+                        startCharOffsetInSource = 0
+                    ),
+                    SemanticParagraph(
+                        text = text.substringAfter("\n\n"),
+                        spans = emptyList(),
+                        style = CssStyle(),
+                        elementId = null,
+                        cfi = null,
+                        startCharOffsetInSource = text.indexOf("===========CD 1=============")
+                    )
+                )
+            ),
+            settings = ReaderSettings()
+        )
+
+        assertEquals(2, Regex("white-space:pre-wrap").findAll(semanticHtml).count())
+        assertTrue(semanticHtml.contains("===========CD 1=============\n[1]     BLOOD.\n[2]     DNA."))
+    }
+
+    @Test
     fun `page document renders only the highlighted occurrence from locator offsets`() {
         val text = "alpha beta alpha beta"
         val page = ReaderPage(
@@ -55,6 +115,7 @@ class ReaderHtmlDocumentBuilderTest {
             cfi = "desktop:0:11:16",
             text = "alpha",
             color = HighlightColor.YELLOW,
+            colorArgb = 0xFF12ABEF.toInt(),
             chapterIndex = 0,
             locator = ReaderLocator(
                 chapterIndex = 0,
@@ -74,7 +135,7 @@ class ReaderHtmlDocumentBuilderTest {
         )
 
         assertEquals(1, Regex("<span class=\"reader-user-highlight").findAll(html).count())
-        assertTrue(html.contains("""alpha beta <span class="reader-user-highlight user-highlight-yellow" data-reader-highlight-id="highlight-1" data-cfi="desktop:0:11:16" data-reader-start-offset="11" data-reader-end-offset="16">alpha</span> beta"""))
+        assertTrue(html.contains("""alpha beta <span class="reader-user-highlight user-highlight-yellow" style="background-color:#12ABEF !important" data-reader-highlight-style="background" data-reader-highlight-id="highlight-1" data-cfi="desktop:0:11:16" data-reader-start-offset="11" data-reader-end-offset="16">alpha</span> beta"""))
     }
 
     @Test

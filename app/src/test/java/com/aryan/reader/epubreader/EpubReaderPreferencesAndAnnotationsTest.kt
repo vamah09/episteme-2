@@ -178,11 +178,27 @@ class EpubReaderPreferencesAndAnnotationsTest {
     }
 
     @Test
+    fun `preferred highlight style round trips and defaults invalid values`() {
+        val prefs = TestSharedPreferences()
+        val context = contextWithPrefs(SETTINGS_PREFS_NAME to prefs)
+
+        assertEquals(HighlightStyle.BACKGROUND, loadPreferredHighlightStyle(context))
+
+        savePreferredHighlightStyle(context, HighlightStyle.WAVY_UNDERLINE)
+
+        assertEquals(HighlightStyle.WAVY_UNDERLINE, loadPreferredHighlightStyle(context))
+        assertEquals(
+            HighlightStyle.BACKGROUND,
+            loadPreferredHighlightStyle(contextWithPrefs(SETTINGS_PREFS_NAME to TestSharedPreferences("preferred_highlight_style" to "missing")))
+        )
+    }
+
+    @Test
     fun `highlight palette saves exactly four known colors and falls back otherwise`() {
         val prefs = TestSharedPreferences()
         val context = contextWithPrefs(SETTINGS_PREFS_NAME to prefs)
 
-        saveHighlightPalette(context, listOf(HighlightColor.CYAN, HighlightColor.MAGENTA, HighlightColor.LIME, HighlightColor.PINK))
+        saveHighlightPalette(context, listOf(HighlightColor.CYAN, HighlightColor.MAGENTA, HighlightColor.LIME, HighlightColor.PINK).map { it.color.toArgb() })
 
         assertEquals(
             listOf(HighlightColor.CYAN, HighlightColor.MAGENTA, HighlightColor.LIME, HighlightColor.PINK),

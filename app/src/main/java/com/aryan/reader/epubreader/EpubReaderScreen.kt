@@ -97,6 +97,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -905,7 +906,7 @@ fun EpubReaderHost(
         mutableStateOf(loadHighlightPalette(context))
     }
 
-    val onUpdateHighlightPalette: (Int, HighlightColor) -> Unit = { index, newColor ->
+    val onUpdateHighlightPalette: (Int, Int) -> Unit = { index, newColor ->
         val newList = currentHighlightPalette.toMutableList()
         if (index in newList.indices) {
             newList[index] = newColor
@@ -1157,6 +1158,9 @@ fun EpubReaderHost(
 
     LaunchedEffect(Unit) {
         Timber.tag("POS_DIAG").d("Reader Opening: initialLocator=$initialLocator, initialCfi=$initialCfi")
+        Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+            "open_start mode=$currentRenderMode initialLocator=$initialLocator initialCfi=${initialCfi?.take(80)} bookId=$bookId"
+        )
     }
 
     var initialScrollTargetForChapter by rememberSaveable(epubBook.title) {
@@ -1761,13 +1765,30 @@ fun EpubReaderHost(
         }
     }
 
-    val onHighlightColorChange: (UserHighlight, HighlightColor) -> Unit = { targetHighlight, newColor ->
+    val onHighlightColorChange: (UserHighlight, Int) -> Unit = { targetHighlight, newColorArgb ->
         val index = userHighlights.indexOfFirst { it.cfi == targetHighlight.cfi }
         if (index != -1) {
-            userHighlights[index] = targetHighlight.copy(color = newColor)
+            val legacyColor = legacyHighlightColorForArgb(newColorArgb)
+            userHighlights[index] = targetHighlight.copy(color = legacyColor, colorArgb = newColorArgb)
             if (currentRenderMode == RenderMode.VERTICAL_SCROLL && targetHighlight.chapterIndex == currentChapterIndex) {
-                val cssClass = newColor.cssClass
-                val jsCommand = "javascript:window.HighlightBridgeHelper.updateHighlightStyle('${escapeJsString(targetHighlight.cfi)}', '$cssClass', '${newColor.id}');"
+                val cssClass = legacyColor.cssClass
+                val colorCss = String.format("#%06X", 0xFFFFFF and newColorArgb)
+                val jsCommand = "javascript:window.HighlightBridgeHelper.updateHighlightStyle('${escapeJsString(targetHighlight.cfi)}', '$cssClass', '$newColorArgb', '$colorCss', '${targetHighlight.style.id}');"
+                webViewRefForTts?.evaluateJavascript(jsCommand, null)
+            }
+        }
+    }
+
+    val onHighlightStyleChange: (UserHighlight, HighlightStyle) -> Unit = { targetHighlight, newStyle ->
+        val index = userHighlights.indexOfFirst { it.cfi == targetHighlight.cfi }
+        if (index != -1) {
+            val current = userHighlights[index]
+            userHighlights[index] = current.copy(style = newStyle)
+            if (currentRenderMode == RenderMode.VERTICAL_SCROLL && targetHighlight.chapterIndex == currentChapterIndex) {
+                val colorArgb = current.colorArgb ?: current.color.color.toArgb()
+                val cssClass = current.color.cssClass
+                val colorCss = String.format("#%06X", 0xFFFFFF and colorArgb)
+                val jsCommand = "javascript:window.HighlightBridgeHelper.updateHighlightStyle('${escapeJsString(targetHighlight.cfi)}', '$cssClass', '$colorArgb', '$colorCss', '${newStyle.id}');"
                 webViewRefForTts?.evaluateJavascript(jsCommand, null)
             }
         }
@@ -2517,44 +2538,81 @@ fun EpubReaderHost(
 
     LaunchedEffect(paginator, currentRenderMode, isPagerInitialized) {
         Timber.tag("ReflowPaginationDiag").d("EpubReaderScreen: Checking paginator init. currentRenderMode=$currentRenderMode, paginator=${paginator != null}, isPagerInitialized=$isPagerInitialized")
+        Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+            "restore_check mode=$currentRenderMode hasPaginator=${paginator != null} initialized=$isPagerInitialized " +
+                "lastKnown=$lastKnownLocator chapterSwitch=$chapterToLoadOnSwitch pageCount=${paginatedPagerState.pageCount}"
+        )
         if (currentRenderMode == RenderMode.PAGINATED && paginator != null && !isPagerInitialized) {
-            scope.launch {
-                val bookPaginator = paginator as? BookPaginator
-                val targetChapterIndex = lastKnownLocator?.chapterIndex
-                    ?: chapterToLoadOnSwitch
-                    ?: initialLocator?.chapterIndex
-                    ?: 0
+            val bookPaginator = paginator as? BookPaginator
+            val targetChapterIndex = lastKnownLocator?.chapterIndex
+                ?: chapterToLoadOnSwitch
+                ?: initialLocator?.chapterIndex
+                ?: 0
 
-                if (bookPaginator != null) {
-                    withTimeoutOrNull(5000L) {
-                        snapshotFlow { bookPaginator.chapterPageCounts[targetChapterIndex] }
-                            .filter { it != null && it > 0 }
-                            .first()
-                    }
+            if (bookPaginator != null) {
+                Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                    "restore_wait chapter=$targetChapterIndex currentCount=${bookPaginator.chapterPageCounts[targetChapterIndex]} total=${bookPaginator.totalPageCount}"
+                )
+                val countReady = withTimeoutOrNull(5000L) {
+                    snapshotFlow { bookPaginator.chapterPageCounts[targetChapterIndex] }
+                        .filter { it != null && it > 0 }
+                        .first()
                 }
-
-                val pageToScrollTo = lastKnownLocator?.let { locator ->
-                    Timber.d("Paginator ready. Finding page for locator: $locator")
-                    (paginator as? BookPaginator)?.findPageForLocator(locator)
-                } ?: run {
-                    Timber.d("Paginator ready, but no locator. Falling back to chapter start.")
-                    val chapterToLoad = chapterToLoadOnSwitch ?: initialLocator?.chapterIndex ?: 0
-                    (paginator as? BookPaginator)?.chapterStartPageIndices?.get(chapterToLoad) ?: 0
-                }
-
-                @Suppress("SENSELESS_COMPARISON")
-                if (pageToScrollTo != null) {
-                    Timber.d("Scrolling to page: $pageToScrollTo")
-                    delay(16)
-                    paginatedPagerState.scrollToPage(pageToScrollTo)
-                } else {
-                    Timber.w("Could not determine a page to scroll to.")
-                }
-
-                delay(100)
-                isPagerInitialized = true
-                chapterToLoadOnSwitch = null
+                Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                    "restore_wait_done chapter=$targetChapterIndex count=$countReady total=${bookPaginator.totalPageCount}"
+                )
             }
+
+            val restoreLocator = lastKnownLocator
+            val pageToScrollTo = restoreLocator?.let { locator ->
+                Timber.d("Paginator ready. Finding page for locator: $locator")
+                Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d("restore_resolve_stable_locator locator=$locator")
+                (paginator as? BookPaginator)?.findStablePageForLocator(locator)
+            } ?: run {
+                Timber.d("Paginator ready, but no locator. Falling back to chapter start.")
+                val chapterToLoad = chapterToLoadOnSwitch ?: initialLocator?.chapterIndex ?: 0
+                val fallbackPage = (paginator as? BookPaginator)?.findStableChapterStartPage(chapterToLoad) ?: 0
+                Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                    "restore_resolve_stable_fallback chapter=$chapterToLoad page=$fallbackPage"
+                )
+                fallbackPage
+            }
+
+            @Suppress("SENSELESS_COMPARISON")
+            if (pageToScrollTo != null) {
+                val readyPageCount = if (paginatedPagerState.pageCount <= pageToScrollTo) {
+                    Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                        "restore_wait_page_count rawPage=$pageToScrollTo currentPageCount=${paginatedPagerState.pageCount} paginatorTotal=${bookPaginator?.totalPageCount}"
+                    )
+                    withTimeoutOrNull(2000L) {
+                        snapshotFlow { paginatedPagerState.pageCount }
+                            .filter { it > pageToScrollTo }
+                            .first()
+                    } ?: paginatedPagerState.pageCount
+                } else {
+                    paginatedPagerState.pageCount
+                }
+                val targetPage = pageToScrollTo.coerceIn(0, (readyPageCount - 1).coerceAtLeast(0))
+                Timber.d("Scrolling to page: $targetPage")
+                Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                    "restore_scroll page=$targetPage rawPage=$pageToScrollTo pageCount=$readyPageCount locator=$restoreLocator"
+                )
+                delay(16)
+                bookPaginator?.onUserScrolledTo(targetPage)
+                paginatedPagerState.scrollToPage(targetPage)
+            } else {
+                Timber.w("Could not determine a page to scroll to.")
+                Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).w(
+                    "restore_failed targetChapter=$targetChapterIndex locator=$restoreLocator pageCount=${paginatedPagerState.pageCount}"
+                )
+            }
+
+            delay(100)
+            isPagerInitialized = true
+            chapterToLoadOnSwitch = null
+            Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                "restore_complete currentPage=${paginatedPagerState.currentPage} pageCount=${paginatedPagerState.pageCount}"
+            )
         }
     }
 
@@ -2567,45 +2625,98 @@ fun EpubReaderHost(
                 if (!isPaginatedReconfigurationRestoring) {
                     (paginator as? BookPaginator)?.getLocatorForPage(page)?.let { locator ->
                         lastKnownLocator = locator
+                        Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                            "page_observed page=$page locator=$locator"
+                        )
                     }
+                } else {
+                    Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                        "page_observed_suppressed page=$page reason=reconfiguration_restore"
+                    )
                 }
             }
     }
-
-    LaunchedEffect(paginatedPagerState.currentPage, paginator, isPaginatedReconfigurationRestoring) {
-        if (currentRenderMode == RenderMode.PAGINATED &&
-            paginator != null &&
-            isPagerInitialized &&
-            !isPaginatedReconfigurationRestoring
+    LaunchedEffect(
+        paginatedPagerState.currentPage,
+        paginator,
+        isPaginatedReconfigurationRestoring,
+        isPagerInitialized,
+        currentRenderMode,
+        paginatedPagerState.pageCount
+    ) {
+        val pageAtLaunch = paginatedPagerState.currentPage
+        if (!shouldSavePaginatedOpenPosition(
+                isPaginatedMode = currentRenderMode == RenderMode.PAGINATED,
+                hasPaginator = paginator != null,
+                isPagerInitialized = isPagerInitialized,
+                isReconfigurationRestoring = isPaginatedReconfigurationRestoring,
+                pageCount = paginatedPagerState.pageCount,
+                pageToSave = pageAtLaunch
+            )
         ) {
-            delay(1500L)
-            val pageToSave = paginatedPagerState.currentPage
+            Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                "save_skip_initial page=$pageAtLaunch mode=$currentRenderMode hasPaginator=${paginator != null} " +
+                    "initialized=$isPagerInitialized restoring=$isPaginatedReconfigurationRestoring pageCount=${paginatedPagerState.pageCount}"
+            )
+            return@LaunchedEffect
+        }
 
-            val locator = (paginator as? BookPaginator)?.getLocatorForPage(pageToSave)
-            val chapterIndex = paginator!!.findChapterIndexForPage(pageToSave)
+        delay(1500L)
+        val pageToSave = paginatedPagerState.currentPage
+        if (!shouldSavePaginatedOpenPosition(
+                isPaginatedMode = currentRenderMode == RenderMode.PAGINATED,
+                hasPaginator = paginator != null,
+                isPagerInitialized = isPagerInitialized,
+                isReconfigurationRestoring = isPaginatedReconfigurationRestoring,
+                pageCount = paginatedPagerState.pageCount,
+                pageToSave = pageToSave
+            )
+        ) {
+            Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                "save_skip_after_delay launchPage=$pageAtLaunch currentPage=$pageToSave mode=$currentRenderMode " +
+                    "hasPaginator=${paginator != null} initialized=$isPagerInitialized restoring=$isPaginatedReconfigurationRestoring " +
+                    "pageCount=${paginatedPagerState.pageCount}"
+            )
+            return@LaunchedEffect
+        }
 
-            if (locator != null && chapterIndex != null) {
-                lastKnownLocator = locator
-                val bookPaginator = paginator as? BookPaginator
-                val progress = if (totalBookLengthChars > 0 && bookPaginator != null) {
-                    val completedCharsInPreviousChapters = chapters.take(chapterIndex).sumOf { it.plainTextCharacterCount().toLong() }
-                    val currentPageInChapter = (bookPaginator.chapterStartPageIndices[chapterIndex] ?: 0).let { pageToSave - it }
-                    val charsScrolledInCurrentChapter = bookPaginator.getCharactersScrolledInChapter(chapterIndex, currentPageInChapter)
-                    val totalCharsScrolled = completedCharsInPreviousChapters + charsScrolledInCurrentChapter
-                    val calculatedProgress = ((totalCharsScrolled.toDouble() / totalBookLengthChars.toDouble()) * 100.0).toFloat()
-                    val isLastPageOfBook = pageToSave == paginatedPagerState.pageCount - 1
-                    if (isLastPageOfBook) 100f else calculatedProgress
+        if (pageToSave != pageAtLaunch) {
+            Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                "save_skip_page_changed launchPage=$pageAtLaunch currentPage=$pageToSave"
+            )
+            return@LaunchedEffect
+        }
 
-                } else {
-                    0f
-                }
+        val locator = (paginator as? BookPaginator)?.getLocatorForPage(pageToSave)
+        val chapterIndex = paginator!!.findChapterIndexForPage(pageToSave)
 
-                Timber.d("Auto-saving paginated position. Page: $pageToSave, Locator: $locator, Progress: $progress%"
-                )
-                onSavePosition(locator, null, progress)
+        if (locator != null && chapterIndex != null) {
+            lastKnownLocator = locator
+            val bookPaginator = paginator as? BookPaginator
+            val progress = if (totalBookLengthChars > 0 && bookPaginator != null) {
+                val completedCharsInPreviousChapters = chapters.take(chapterIndex).sumOf { it.plainTextCharacterCount().toLong() }
+                val currentPageInChapter = (bookPaginator.chapterStartPageIndices[chapterIndex] ?: 0).let { pageToSave - it }
+                val charsScrolledInCurrentChapter = bookPaginator.getCharactersScrolledInChapter(chapterIndex, currentPageInChapter)
+                val totalCharsScrolled = completedCharsInPreviousChapters + charsScrolledInCurrentChapter
+                val calculatedProgress = ((totalCharsScrolled.toDouble() / totalBookLengthChars.toDouble()) * 100.0).toFloat()
+                val isLastPageOfBook = pageToSave == paginatedPagerState.pageCount - 1
+                if (isLastPageOfBook) 100f else calculatedProgress
+
             } else {
-                Timber.w("Could not auto-save paginated position. Locator or chapterIndex was null.")
+                0f
             }
+
+            Timber.d("Auto-saving paginated position. Page: $pageToSave, Locator: $locator, Progress: $progress%"
+            )
+            Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).d(
+                "save_position page=$pageToSave locator=$locator chapter=$chapterIndex progress=$progress"
+            )
+            onSavePosition(locator, null, progress)
+        } else {
+            Timber.w("Could not auto-save paginated position. Locator or chapterIndex was null.")
+            Timber.tag(TAG_EPUB_PAGINATED_OPEN_DIAG).w(
+                "save_failed page=$pageToSave locator=$locator chapter=$chapterIndex"
+            )
         }
     }
 
@@ -4315,25 +4426,26 @@ fun EpubReaderHost(
                 stableTopPadding = currentTopPadding
             }
 
-            val effectiveTopPadding = if (currentRenderMode == RenderMode.PAGINATED) {
-                if (systemUiMode == SystemUiMode.HIDDEN) {
-                    0.dp
-                } else {
-                    val insets = ViewCompat.getRootWindowInsets(view)
-                    val ignoringVisibilityTopPx = insets?.getInsetsIgnoringVisibility(
-                        WindowInsetsCompat.Type.statusBars())?.top ?: 0
-                    val ignoringVisibilityTop = with(density) { ignoringVisibilityTopPx.toDp() }
-
-                    if (ignoringVisibilityTop > 0.dp) {
-                        ignoringVisibilityTop
-                    } else if (stableTopPadding > 0.dp) {
-                        stableTopPadding
-                    } else {
-                        24.dp
-                    }
-                }
+            val stableChromeTopPadding = if (systemUiMode == SystemUiMode.HIDDEN) {
+                0.dp
             } else {
-                currentTopPadding
+                val insets = ViewCompat.getRootWindowInsets(view)
+                val ignoringVisibilityTopPx = insets?.getInsetsIgnoringVisibility(
+                    WindowInsetsCompat.Type.statusBars())?.top ?: 0
+                val ignoringVisibilityTop = with(density) { ignoringVisibilityTopPx.toDp() }
+
+                if (ignoringVisibilityTop > 0.dp) {
+                    ignoringVisibilityTop
+                } else if (stableTopPadding > 0.dp) {
+                    stableTopPadding
+                } else {
+                    24.dp
+                }
+            }
+            val effectiveTopPadding = when {
+                currentRenderMode == RenderMode.PAGINATED -> stableChromeTopPadding
+                isNativeVerticalMode -> stableChromeTopPadding
+                else -> currentTopPadding
             }
 
             val epubJumpBackLabel = epubJumpHistory.backLocator?.epubJumpLabel()
@@ -4504,7 +4616,7 @@ fun EpubReaderHost(
             ) {
                 when (currentRenderMode) {
                     RenderMode.VERTICAL_SCROLL -> {
-                        val pageInfoReserve = if (isPageInfoVisible) pageInfoBarHeight else 0.dp
+                        val pageInfoReserve = if (shouldReserveEpubPageInfoBarSpace(pageInfoMode, showBars, isNativeVerticalMode)) pageInfoBarHeight else 0.dp
                         val contentTopPadding = if (pageInfoPosition == PageInfoPosition.TOP) pageInfoReserve else 0.dp
                         val contentBottomPadding = if (pageInfoPosition == PageInfoPosition.BOTTOM) pageInfoReserve else 0.dp
 
@@ -4632,9 +4744,9 @@ fun EpubReaderHost(
                                     userHighlights = userHighlights.filter { highlight ->
                                         highlight.chapterIndex in (currentChapterIndex - 1)..(currentChapterIndex + 1)
                                     },
-                                    onHighlightCreated = { cfi, text, colorId, locator ->
+                                    onHighlightCreated = { cfi, text, colorId, locator, style ->
                                         val chapterIndex = locator.chapterIndex ?: currentChapterIndex
-                                        val color = HighlightColor.entries.find { it.id == colorId } ?: HighlightColor.YELLOW
+                                        val (color, colorArgb) = highlightColorFromToken(colorId)
                                         val finalCfi = processAndAddHighlight(
                                             newCfi = cfi,
                                             newText = text,
@@ -4645,7 +4757,9 @@ fun EpubReaderHost(
                                                 chapterIndex = chapterIndex,
                                                 cfi = cfi,
                                                 textQuote = text
-                                            )
+                                            ),
+                                            newColorArgb = colorArgb,
+                                            newStyle = style
                                         )
                                         if (pendingNoteForNewHighlight) {
                                             pendingNoteForNewHighlight = false
@@ -4856,17 +4970,19 @@ fun EpubReaderHost(
                                             userHighlights = userHighlights.filter { it.chapterIndex == targetChapterIndex },
                                             activeHighlightPalette = currentHighlightPalette,
                                             onUpdatePalette = onUpdateHighlightPalette,
-                                            onHighlightCreated = { cfi, text, colorId ->
+                                            onHighlightCreated = { cfi, text, colorId, style ->
                                                 Timber.d("Vertical Mode (Source): Creating Highlight. CFI: $cfi")
                                                 Timber.d("Vertical Mode (Source): Text Snippet: '${text.take(50)}...'")
-                                                val color = HighlightColor.entries.find { it.id == colorId } ?: HighlightColor.YELLOW
+                                                val (color, colorArgb) = highlightColorFromToken(colorId)
 
                                                 val finalCfi = processAndAddHighlight(
                                                     newCfi = cfi,
                                                     newText = text,
                                                     newColor = color,
                                                     chapterIndex = currentChapterIndex,
-                                                    currentList = userHighlights
+                                                    currentList = userHighlights,
+                                                    newColorArgb = colorArgb,
+                                                    newStyle = style
                                                 )
 
                                                 if (pendingNoteForNewHighlight) {
@@ -5835,7 +5951,7 @@ fun EpubReaderHost(
                                     val currentChapter = currentChapterInPaginatedMode ?: return@filter false
                                     highlight.chapterIndex in (currentChapter - 1)..(currentChapter + 1)
                                 },
-                                onHighlightCreated = { cfi, text, colorId, locator ->
+                                onHighlightCreated = { cfi, text, colorId, locator, style ->
                                     val chapterIndex = locator.chapterIndex ?: currentChapterInPaginatedMode ?: 0
                                     Timber.tag(TAG_PAGINATED_HIGHLIGHT_DIAG).d(
                                         "persist_request cfi=$cfi colorId=$colorId chapter=$chapterIndex " +
@@ -5843,7 +5959,7 @@ fun EpubReaderHost(
                                             "text='${epubHighlightDiagSnippet(text)}'"
                                     )
                                     Timber.d("EpubReaderScreen: onHighlightCreated. CFI: $cfi")
-                                    val color = HighlightColor.entries.find { it.id == colorId } ?: HighlightColor.YELLOW
+                                    val (color, colorArgb) = highlightColorFromToken(colorId)
                                     val finalCfi = processAndAddHighlight(
                                         newCfi = cfi,
                                         newText = text,
@@ -5854,7 +5970,9 @@ fun EpubReaderHost(
                                             chapterIndex = chapterIndex,
                                             cfi = cfi,
                                             textQuote = text
-                                        )
+                                        ),
+                                        newColorArgb = colorArgb,
+                                        newStyle = style
                                     )
                                     val savedHighlight = userHighlights.find {
                                         it.chapterIndex == chapterIndex && it.cfi == finalCfi
@@ -7201,6 +7319,7 @@ fun EpubReaderHost(
                             effectiveText = effectiveText,
                             activeHighlightPalette = currentHighlightPalette,
                             onColorChange = { newColor -> onHighlightColorChange(targetHighlight, newColor) },
+                            onStyleChange = { newStyle -> onHighlightStyleChange(targetHighlight, newStyle) },
                             onOpenPaletteManager = { showPaletteManager = true },
                             onDismiss = { highlightToNoteCfi = null },
                             onSave = { noteText ->

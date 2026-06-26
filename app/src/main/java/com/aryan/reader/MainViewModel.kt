@@ -39,6 +39,7 @@ import com.aryan.reader.paginatedreader.semanticBlockModule
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.annotation.OptIn
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.edit
 import androidx.core.graphics.createBitmap
@@ -90,6 +91,7 @@ import com.aryan.reader.paginatedreader.data.BookCacheDatabase
 import com.aryan.reader.paginatedreader.data.BookProcessingWorker
 import com.aryan.reader.pdf.PdfCoverGenerator
 import com.aryan.reader.pdf.PDF_BLANK_PAGE_PERSISTENCE_TAG
+import com.aryan.reader.pdf.PdfHighlightColor
 import com.aryan.reader.pdf.PdfUserHighlight
 import com.aryan.reader.pdf.PdfiumCoreProvider
 import com.aryan.reader.pdf.PdfiumEngineProvider
@@ -107,10 +109,18 @@ import com.aryan.reader.pdf.data.PdfTextBoxRepository
 import com.aryan.reader.pdf.data.PdfTextRepository
 import com.aryan.reader.pdf.data.VirtualPage
 import com.aryan.reader.pptx.PptxCoverGenerator
+import com.aryan.reader.shared.AnnotationExportDocument
+import com.aryan.reader.shared.AnnotationExportFormat
+import com.aryan.reader.shared.AnnotationExportFormatter
+import com.aryan.reader.shared.EpubAnnotationSerializer
 import com.aryan.reader.shared.SharedFileCapabilities
 import com.aryan.reader.shared.SharedLibraryEditor
 import com.aryan.reader.shared.SharedImportOutcomeCounts
 import com.aryan.reader.shared.SharedImportPlanner
+import com.aryan.reader.shared.pdf.PdfAnnotationKind
+import com.aryan.reader.shared.pdf.PdfInkTool
+import com.aryan.reader.shared.pdf.SharedPdfAndroidHighlightColors
+import com.aryan.reader.shared.pdf.SharedPdfAnnotation
 import com.aryan.reader.shared.pdf.SharedPdfAnnotationSidecarCodec
 import com.aryan.reader.shared.shouldApplyRemoteCloudBookMetadataUpdate
 import com.aryan.reader.shared.shouldDownloadRemoteCloudBookContent
@@ -722,9 +732,10 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        val currentState = _internalState.value
+        val projectedState = uiState.value
+        val currentState = AndroidSharedStateBridge.reconcileTabState(_internalState.value, projectedState)
         if (bookId !in currentState.openTabIds) {
-            if (currentState.openTabIds.size >= 20) {
+            if (currentState.openTabIds.size >= MAX_OPEN_PDF_TABS) {
                 viewModelScope.launch(Dispatchers.Main) {
                     showBanner("Maximum of 20 tabs allowed. Please close a tab first.", isError = true)
                 }
@@ -733,7 +744,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
         val tabState = AndroidSharedStateBridge.openBookTab(
             current = currentState,
-            projectedState = uiState.value,
+            projectedState = projectedState,
             bookId = bookId
         )
 
@@ -744,6 +755,11 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
         uri?.let {
             persistReaderSession(bookId, item.type)
+            Timber.tag(PDF_RENAME_TRACE_TAG).i(
+                "viewModel.switchTab bookId=$bookId type=${item.type} uri=$it " +
+                    "displayName=${item.displayName} title=${item.title} customName=${item.customName} " +
+                    "usePdfFileName=${_internalState.value.usePdfFileNameAsDisplayName}"
+            )
             Timber.tag("PdfTabSync").d("ViewModel: Setting new URI directly: $it")
             _internalState.update { state ->
                 state.copy(
@@ -807,6 +823,44 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         _internalState.update { it.copy(showTagSelectionDialogFor = emptySet()) }
     }
 
+    fun openAddSelectedToShelf(bookIds: Set<String>) {
+        val sanitizedBookIds = SharedLibraryEditor.cleanBookIds(bookIds)
+        if (sanitizedBookIds.isEmpty()) return
+        _internalState.update { it.copy(showAddSelectedToShelfDialogFor = sanitizedBookIds) }
+    }
+
+    fun closeAddSelectedToShelf() {
+        _internalState.update { it.copy(showAddSelectedToShelfDialogFor = emptySet()) }
+    }
+
+    fun addSelectedBooksToShelves(shelfIds: Set<String>, bookIds: Set<String>) {
+        val sanitizedBookIds = SharedLibraryEditor.cleanBookIds(bookIds)
+        val mutableManualShelfIds = _internalState.value.shelves
+            .filter { shelf -> shelf.type == ShelfType.MANUAL && SharedLibraryEditor.canMutateShelf(shelf.id) }
+            .mapTo(mutableSetOf()) { shelf -> shelf.id }
+        val sanitizedShelfIds = shelfIds
+            .mapNotNullTo(linkedSetOf()) { shelfId ->
+                shelfId.trim().takeIf { it in mutableManualShelfIds }
+            }
+        if (sanitizedBookIds.isEmpty() || sanitizedShelfIds.isEmpty()) {
+            closeAddSelectedToShelf()
+            return
+        }
+
+        viewModelScope.launch {
+            sanitizedShelfIds.forEach { shelfId ->
+                recentFilesRepository.addBooksToShelf(shelfId, sanitizedBookIds.toList())
+                syncShelfChangeToFirestore(shelfId)
+            }
+            _internalState.update {
+                it.copy(
+                    showAddSelectedToShelfDialogFor = emptySet(),
+                    contextualActionItems = emptySet()
+                )
+            }
+        }
+    }
+
     suspend fun getFileInfoItem(bookId: String): RecentFileItem? {
         return recentFilesRepository.getFileByBookId(bookId)
     }
@@ -843,6 +897,16 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun deleteTag(tagId: String) {
+        val cleanTagId = tagId.trim().takeIf { it.isNotBlank() } ?: return
+        viewModelScope.launch {
+            recentFilesRepository.deleteTag(cleanTagId)
+            val currentFilters = _internalState.value.libraryFilters
+            if (cleanTagId in currentFilters.tagIds) {
+                updateLibraryFilters(currentFilters.copy(tagIds = currentFilters.tagIds - cleanTagId))
+            }
+        }
+    }
     private fun buildDefaultTags(): List<TagEntity> {
         val now = System.currentTimeMillis()
         return listOf(
@@ -939,10 +1003,11 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun closeTab(bookId: String) {
         Timber.tag("PdfTabSync").i("ViewModel: closeTab called for $bookId")
-        val currentState = _internalState.value
+        val projectedState = uiState.value
+        val currentState = AndroidSharedStateBridge.reconcileTabState(_internalState.value, projectedState)
         val tabState = AndroidSharedStateBridge.closeBookTab(
             current = currentState,
-            projectedState = uiState.value,
+            projectedState = projectedState,
             bookId = bookId
         )
 
@@ -2041,6 +2106,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         richTextPageLayouts: List<com.aryan.reader.pdf.PageTextLayout>? = null,
         textBoxes: List<PdfTextBox>? = null,
         highlights: List<PdfUserHighlight>? = null,
+        customHighlightColors: Map<PdfHighlightColor, Color> = emptyMap(),
         bookId: String
     ) {
         viewModelScope.launch {
@@ -2059,7 +2125,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         inkAnnotations = annotations,
                         richTextPageLayouts = richTextPageLayouts,
                         textBoxes = textBoxes,
-                        highlights = highlights
+                        highlights = highlights,
+                        customHighlightColors = customHighlightColors
                     )
                     showBanner(appContext.getString(R.string.banner_pdf_saved))
                 } else {
@@ -2080,11 +2147,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 it.copy(isLoading = true, bannerMessage = BannerMessage(appContext.getString(R.string.banner_saving_original_pdf)))
             }
             try {
-                val contentResolver = appContext.contentResolver
-                contentResolver.openInputStream(sourceUri)?.use { input ->
-                    contentResolver.openOutputStream(destUri)?.use { output ->
-                        input.copyTo(output)
-                    }
+                withContext(Dispatchers.IO) {
+                    copyUriBytes(sourceUri, destUri)
                 }
                 showBanner(appContext.getString(R.string.banner_original_pdf_saved))
             } catch (e: Exception) {
@@ -2117,6 +2181,108 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         ) {
             markPendingExternalFileRemoval(bookId, importedCopyUriString)
         }
+    }
+
+    data class PreparedAnnotationExport(
+        val fileName: String,
+        val contents: String
+    )
+
+    fun prepareAnnotationExport(
+        item: RecentFileItem,
+        format: AnnotationExportFormat,
+        onReady: (PreparedAnnotationExport) -> Unit
+    ) {
+        viewModelScope.launch {
+            _internalState.update {
+                it.copy(isLoading = true, bannerMessage = BannerMessage(appContext.getString(R.string.banner_exporting_annotations)))
+            }
+            try {
+                val latestItem = recentFilesRepository.getFileByBookId(item.bookId) ?: item
+                val document = buildAnnotationExportDocument(latestItem)
+                val exportText = AnnotationExportFormatter.render(document, format)
+                if (exportText.isBlank()) {
+                    showBanner(appContext.getString(R.string.banner_no_annotations_to_export), isError = true)
+                    return@launch
+                }
+                onReady(
+                    PreparedAnnotationExport(
+                        fileName = AnnotationExportFormatter.suggestedFileName(document.bookTitle, format),
+                        contents = exportText
+                    )
+                )
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to prepare annotation export")
+                showBanner(appContext.getString(R.string.error_exporting_annotations, e.localizedMessage ?: e.message.orEmpty()), isError = true)
+            } finally {
+                _internalState.update { it.copy(isLoading = false) }
+            }
+        }
+    }
+
+    fun saveAnnotationExport(contents: String, destUri: Uri) {
+        viewModelScope.launch {
+            _internalState.update {
+                it.copy(isLoading = true, bannerMessage = BannerMessage(appContext.getString(R.string.banner_exporting_annotations)))
+            }
+            try {
+                if (contents.isBlank()) {
+                    showBanner(appContext.getString(R.string.banner_no_annotations_to_export), isError = true)
+                    return@launch
+                }
+                withContext(Dispatchers.IO) {
+                    appContext.contentResolver.openOutputStream(destUri)?.use { output ->
+                        output.write(contents.toByteArray(Charsets.UTF_8))
+                    } ?: error("Could not open destination file.")
+                }
+                showBanner(appContext.getString(R.string.banner_annotations_exported))
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to export annotations")
+                showBanner(appContext.getString(R.string.error_exporting_annotations, e.localizedMessage ?: e.message.orEmpty()), isError = true)
+            } finally {
+                _internalState.update { it.copy(isLoading = false) }
+            }
+        }
+    }
+
+    private suspend fun buildAnnotationExportDocument(item: RecentFileItem): AnnotationExportDocument {
+        val title = item.cardTitle(uiState.value.usePdfFileNameAsDisplayName)
+        return when (item.type) {
+            FileType.EPUB,
+            FileType.MOBI,
+            FileType.MD,
+            FileType.TXT,
+            FileType.HTML,
+            FileType.FB2,
+            FileType.DOCX,
+            FileType.ODT,
+            FileType.FODT,
+            FileType.PPTX -> AnnotationExportFormatter.fromEpubHighlights(
+                bookTitle = title,
+                sourceType = item.type,
+                highlights = EpubAnnotationSerializer.parseHighlightsJson(item.highlightsJson)
+            )
+            FileType.PDF -> AnnotationExportFormatter.fromPdfAnnotations(
+                bookTitle = title,
+                annotations = pdfHighlightRepository.loadHighlights(item.bookId).map { it.toSharedPdfHighlightAnnotation() }
+            )
+            else -> AnnotationExportDocument(title, item.type, emptyList())
+        }
+    }
+
+    private fun PdfUserHighlight.toSharedPdfHighlightAnnotation(): SharedPdfAnnotation {
+        return SharedPdfAnnotation(
+            id = id,
+            pageIndex = pageIndex,
+            kind = PdfAnnotationKind.HIGHLIGHT,
+            tool = PdfInkTool.HIGHLIGHTER,
+            text = text,
+            note = note,
+            comments = comments,
+            colorArgb = colorArgb ?: SharedPdfAndroidHighlightColors.argbForName(color.name),
+            rangeStartIndex = range.first,
+            rangeEndIndex = (range.second - 1).coerceAtLeast(range.first)
+        )
     }
 
     fun saveOriginalFile(sourceUri: Uri, destUri: Uri) {
@@ -2178,6 +2344,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         richTextPageLayouts: List<com.aryan.reader.pdf.PageTextLayout>? = null,
         textBoxes: List<PdfTextBox>? = null,
         highlights: List<PdfUserHighlight>? = null,
+        customHighlightColors: Map<PdfHighlightColor, Color> = emptyMap(),
         includeAnnotations: Boolean,
         filename: String,
         bookId: String? = null
@@ -2215,7 +2382,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                             inkAnnotations = annotations,
                             richTextPageLayouts = richTextPageLayouts,
                             textBoxes = textBoxes,
-                            highlights = highlights
+                            highlights = highlights,
+                            customHighlightColors = customHighlightColors
                         )
                     } else {
                         appContext.contentResolver.openInputStream(sourceUri)?.use { input ->
@@ -4691,6 +4859,35 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
         }
+        if (coverPath == null) {
+            val thumbnailItem = RecentFileItem(
+                bookId = bookId,
+                uriString = uri.toString(),
+                type = type,
+                displayName = displayName,
+                timestamp = System.currentTimeMillis(),
+                title = title,
+                author = author,
+                isRecent = isRecent,
+                sourceFolderUri = sourceFolderUri,
+                fileSize = fileSize,
+                fileContentModifiedTimestamp = fileContentModifiedTimestamp,
+                seriesName = seriesName,
+                seriesIndex = seriesIndex,
+                description = description
+            )
+            try {
+                ContentThumbnailGenerator(appContext).generate(thumbnailItem)?.let { thumbnail ->
+                    try {
+                        coverPath = recentFilesRepository.saveCoverToCache(thumbnail, uri)
+                    } finally {
+                        thumbnail.recycle()
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to generate content thumbnail for $displayName")
+            }
+        }
 
         val newLastModifiedTimestamp =
             existingItem?.lastModifiedTimestamp ?: System.currentTimeMillis()
@@ -4715,6 +4912,13 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             seriesIndex = seriesIndex,
             description = description
         )
+        if (type in PDF_VIEWER_FILE_TYPES) {
+            Timber.tag(PDF_RENAME_TRACE_TAG).i(
+                "viewModel.addFileToRecent.pdf bookId=$bookId uri=$uri displayName=$displayName " +
+                    "title=$title existingCustomName=${existingItem?.customName} " +
+                    "existingTitle=${existingItem?.title} isNewBook=$isNewBook sourceFolderUri=$sourceFolderUri"
+            )
+        }
         recentFilesRepository.addRecentFile(newItem)
         Timber.i("Added/Updated $displayName ($type) to recent files via repository.")
 
@@ -5404,11 +5608,19 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         ReaderPerfLog.d("FileOpen start bookId=$bookId type=$type")
         Timber.tag("FileOpenPerf")
             .d("[$bookId] openBook START | type=$type | displayName=$originalDisplayName")
+        if (type in PDF_VIEWER_FILE_TYPES) {
+            Timber.tag(PDF_RENAME_TRACE_TAG).i(
+                "viewModel.openBook.start bookId=$bookId type=$type uri=$uri " +
+                    "originalDisplayName=$originalDisplayName selectedBookId=${_internalState.value.selectedBookId} " +
+                    "usePdfFileName=${_internalState.value.usePdfFileNameAsDisplayName}"
+            )
+        }
 
-        val currentTabState = _internalState.value
+        val projectedState = uiState.value
+        val currentTabState = AndroidSharedStateBridge.reconcileTabState(_internalState.value, projectedState)
         if (currentTabState.isTabsEnabled && type == FileType.PDF) {
             if (bookId !in currentTabState.openTabIds) {
-                if (currentTabState.openTabIds.size >= 20) {
+                if (currentTabState.openTabIds.size >= MAX_OPEN_PDF_TABS) {
                     viewModelScope.launch(Dispatchers.Main) {
                         showBanner("Maximum of 20 tabs allowed. Please close a tab first.", isError = true)
                     }
@@ -5417,7 +5629,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             }
             val tabState = AndroidSharedStateBridge.openBookTab(
                 current = currentTabState,
-                projectedState = uiState.value,
+                projectedState = projectedState,
                 bookId = bookId
             )
             persistTabState(tabState.openTabIds, tabState.activeTabBookId)
@@ -5478,6 +5690,12 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             if (type in PDF_VIEWER_FILE_TYPES) {
                 viewModelScope.launch {
                     val recentItem = recentFilesRepository.getFileByBookId(bookId)
+                    Timber.tag(PDF_RENAME_TRACE_TAG).i(
+                        "viewModel.openBook.pdfBranch bookId=$bookId uri=$uri " +
+                            "dbDisplayName=${recentItem?.displayName} dbTitle=${recentItem?.title} " +
+                            "dbCustomName=${recentItem?.customName} dbType=${recentItem?.type} " +
+                            "initialPage=${initialPageOverride ?: recentItem?.lastPage} persistToLibrary=$persistToLibrary"
+                    )
 
                     Timber.tag("FileOpenPerf")
                         .d("[$bookId] Branch: PDF | elapsed=${System.currentTimeMillis() - openBookStartTime}ms")
@@ -6063,6 +6281,14 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun onRecentFileClicked(item: RecentFileItem) {
         ReaderPerfLog.d("FileOpen click bookId=${item.bookId} name=${item.displayName}")
+        if (item.type in PDF_VIEWER_FILE_TYPES) {
+            Timber.tag(PDF_RENAME_TRACE_TAG).i(
+                "viewModel.recentClick bookId=${item.bookId} type=${item.type} uri=${item.uriString} " +
+                    "displayName=${item.displayName} title=${item.title} customName=${item.customName} " +
+                    "isAvailable=${item.isAvailable} sourceFolderUri=${item.sourceFolderUri} " +
+                    "usePdfFileName=${_internalState.value.usePdfFileNameAsDisplayName}"
+            )
+        }
         val currentSelection = _internalState.value.contextualActionItems
         if (currentSelection.isNotEmpty()) {
             Timber.d("Toggling selection for: ${item.displayName}")
@@ -6230,6 +6456,16 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         _internalState.update { it.copy(showCreateShelfDialog = true) }
     }
 
+    fun showCreateShelfDialogForSelectedBooks(bookIds: Set<String>) {
+        val sanitizedBookIds = SharedLibraryEditor.cleanBookIds(bookIds)
+        _internalState.update {
+            it.copy(
+                showCreateShelfDialog = true,
+                createShelfSelectedBookIds = sanitizedBookIds
+            )
+        }
+    }
+
     fun handleExternalFilePrompt(bookId: String, keep: Boolean, dontAskAgain: Boolean) {
         if (dontAskAgain) {
             val newBehavior = if (keep) "KEEP" else "DELETE"
@@ -6248,15 +6484,25 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun dismissCreateShelfDialog() {
-        _internalState.update { it.copy(showCreateShelfDialog = false) }
+        _internalState.update {
+            it.copy(
+                showCreateShelfDialog = false,
+                createShelfSelectedBookIds = emptySet()
+            )
+        }
     }
 
     fun createShelf(name: String) {
         val shelfId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         val shelf = SharedLibraryEditor.createShelfRecord(name, shelfId)?.toShelfEntity(now) ?: return
+        val selectedBookIds = SharedLibraryEditor.cleanBookIds(_internalState.value.createShelfSelectedBookIds)
         viewModelScope.launch {
             recentFilesRepository.addShelf(shelf)
+            if (selectedBookIds.isNotEmpty()) {
+                recentFilesRepository.addBooksToShelf(shelfId, selectedBookIds.toList())
+                _internalState.update { it.copy(contextualActionItems = emptySet()) }
+            }
             dismissCreateShelfDialog()
             syncShelfChangeToFirestore(shelfId)
         }
@@ -6265,7 +6511,12 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     fun setMainScreenPage(page: Int) {
         val sanitizedPage = page.coerceIn(0, 1)
         if (_internalState.value.mainScreenStartPage == sanitizedPage) return
-        _internalState.update { it.copy(mainScreenStartPage = sanitizedPage) }
+        _internalState.update {
+            it.copy(
+                mainScreenStartPage = sanitizedPage,
+                contextualActionItems = emptySet()
+            )
+        }
         persistLibraryLandingState()
     }
 
@@ -6881,14 +7132,24 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             val item = recentFilesRepository.getFileByBookId(bookId)
             if (item != null) {
-                val updatedItem = item.copy(customName = newName, lastModifiedTimestamp = System.currentTimeMillis())
-                recentFilesRepository.addRecentFile(updatedItem)
+                Timber.tag(PDF_RENAME_TRACE_TAG).i(
+                    "viewModel.rename.before bookId=$bookId type=${item.type} displayName=${item.displayName} " +
+                        "title=${item.title} oldCustomName=${item.customName} newCustomName=$newName " +
+                        "uri=${item.uriString} sourceFolderUri=${item.sourceFolderUri}"
+                )
+                recentFilesRepository.updateCustomName(bookId, newName)
+                val savedItem = recentFilesRepository.getFileByBookId(bookId)
+                Timber.tag(PDF_RENAME_TRACE_TAG).i(
+                    "viewModel.rename.after bookId=$bookId savedDisplayName=${savedItem?.displayName} " +
+                        "savedTitle=${savedItem?.title} savedCustomName=${savedItem?.customName} " +
+                        "savedUri=${savedItem?.uriString}"
+                )
 
-                if (uiState.value.isSyncEnabled) {
-                    uploadSingleBookMetadata(updatedItem)
+                if (uiState.value.isSyncEnabled && savedItem != null) {
+                    uploadSingleBookMetadata(savedItem)
                 }
 
-                if (updatedItem.sourceFolderUri != null) {
+                if (savedItem?.sourceFolderUri != null) {
                     launch(Dispatchers.IO) {
                         recentFilesRepository.syncLocalMetadataToFolder(bookId, force = true)
                     }
@@ -6918,11 +7179,17 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     seriesIndex = result.metadata.seriesIndex,
                     description = result.metadata.description
                 )
+                val coverPath = result.cover?.let { cover ->
+                    currentItem.uriString?.toUri()?.let { uri ->
+                        recentFilesRepository.saveEmbeddedCoverToCache(cover.bytes, uri, cover.extension)
+                    }
+                }
                 recentFilesRepository.updateUserEditableMetadata(
                     bookId = bookId,
                     metadata = savedMetadata,
                     fileSize = result.fileSize,
-                    fileContentModifiedTimestamp = result.fileContentModifiedTimestamp
+                    fileContentModifiedTimestamp = result.fileContentModifiedTimestamp,
+                    coverImagePath = coverPath
                 )
                 val updatedItem = recentFilesRepository.getFileByBookId(bookId)
                 if (updatedItem != null && uiState.value.isSyncEnabled && updatedItem.sourceFolderUri == null) {
@@ -6956,7 +7223,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 author = currentItem.originalAuthor,
                 seriesName = currentItem.originalSeriesName,
                 seriesIndex = currentItem.originalSeriesIndex,
-                description = currentItem.originalDescription
+                description = currentItem.originalDescription,
+                restoreOriginalCover = true
             )
             val editResult = epubMetadataFileEditor.writeMetadata(currentItem, metadata)
             editResult.onFailure { error ->
@@ -6964,10 +7232,16 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 showBanner("Could not restore EPUB metadata.", isError = true)
             }.onSuccess { result ->
                 cleanupBookDataLocally(bookId)
+                val coverPath = result.cover?.let { cover ->
+                    currentItem.uriString?.toUri()?.let { uri ->
+                        recentFilesRepository.saveEmbeddedCoverToCache(cover.bytes, uri, cover.extension)
+                    }
+                }
                 recentFilesRepository.restoreOriginalMetadata(
                     bookId = bookId,
                     fileSize = result.fileSize,
-                    fileContentModifiedTimestamp = result.fileContentModifiedTimestamp
+                    fileContentModifiedTimestamp = result.fileContentModifiedTimestamp,
+                    coverImagePath = coverPath
                 )
                 val restoredItem = recentFilesRepository.getFileByBookId(bookId)
                 if (restoredItem != null && uiState.value.isSyncEnabled && restoredItem.sourceFolderUri == null) {
@@ -7314,6 +7588,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         internal const val KEY_PINNED_HOME = "pinned_home_books"
         internal const val KEY_PINNED_LIBRARY = "pinned_library_books"
         private const val KEY_RECENT_FILES_LIMIT = "recent_files_limit"
+        private const val MAX_OPEN_PDF_TABS = 20
         private const val KEY_TABS_ENABLED = "tabs_enabled"
         private const val KEY_OPEN_TAB_IDS = "open_tab_ids"
         private const val KEY_ACTIVE_TAB = "active_tab_book_id"

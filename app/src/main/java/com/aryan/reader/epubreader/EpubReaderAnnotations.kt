@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -67,9 +68,19 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.edit
 import androidx.core.text.HtmlCompat
+import com.aryan.reader.BrightnessSlider
+import com.aryan.reader.ColorComparePill
+import com.aryan.reader.HexInput
 import com.aryan.reader.R
+import com.aryan.reader.RgbInputColumn
+import com.aryan.reader.SpectrumBox
+import com.aryan.reader.readerModalMaxHeightDp
 import com.aryan.reader.epub.EpubChapter
 import com.aryan.reader.shared.EpubAnnotationSerializer
 import com.aryan.reader.shared.ReaderLocator
@@ -78,28 +89,84 @@ private const val BOOKMARK_PREFS_NAME = "epub_reader_bookmarks"
 
 typealias Bookmark = com.aryan.reader.shared.EpubBookmark
 typealias HighlightColor = com.aryan.reader.shared.HighlightColor
+typealias HighlightStyle = com.aryan.reader.shared.HighlightStyle
 typealias UserHighlight = com.aryan.reader.shared.UserHighlight
 
 fun escapeJsString(value: String): String {
     return com.aryan.reader.shared.escapeJsString(value)
 }
 
-fun saveHighlightPalette(context: Context, palette: List<HighlightColor>) {
+private val DefaultHighlightPaletteArgb: List<Int>
+    get() = listOf(
+        HighlightColor.YELLOW.color.toArgb(),
+        HighlightColor.GREEN.color.toArgb(),
+        HighlightColor.BLUE.color.toArgb(),
+        HighlightColor.RED.color.toArgb()
+    )
+
+fun saveHighlightPalette(context: Context, palette: List<Int>) {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
-    val ids = palette.joinToString(",") { it.id }
-    prefs.edit { putString("highlight_palette_ids", ids) }
+    val argbs = sanitizeHighlightPalette(palette).joinToString(",") { it.toString() }
+    prefs.edit {
+        putString("highlight_palette_argbs", argbs)
+        remove("highlight_palette_ids")
+    }
 }
 
-fun loadHighlightPalette(context: Context): List<HighlightColor> {
+fun loadHighlightPalette(context: Context): List<Int> {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    val savedArgbs = prefs.getString("highlight_palette_argbs", null)
+    if (savedArgbs != null) {
+        val list = savedArgbs.split(",").mapNotNull { it.toIntOrNull() }
+        if (list.size == 4) return list
+    }
     val savedIds = prefs.getString("highlight_palette_ids", null)
     if (savedIds != null) {
         val list = savedIds.split(",").mapNotNull { id ->
-            HighlightColor.entries.find { it.id == id }
+            HighlightColor.entries.find { it.id == id }?.color?.toArgb()
         }
         if (list.size == 4) return list
     }
-    return listOf(HighlightColor.YELLOW, HighlightColor.GREEN, HighlightColor.BLUE, HighlightColor.RED)
+    return DefaultHighlightPaletteArgb
+}
+
+fun savePreferredHighlightStyle(context: Context, style: HighlightStyle) {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit { putString("preferred_highlight_style", style.id) }
+}
+
+fun loadPreferredHighlightStyle(context: Context): HighlightStyle {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    return HighlightStyle.fromId(prefs.getString("preferred_highlight_style", null))
+}
+
+private fun sanitizeHighlightPalette(palette: List<Int>): List<Int> {
+    return palette.takeIf { it.size == 4 } ?: DefaultHighlightPaletteArgb
+}
+
+internal fun legacyHighlightColorForArgb(argb: Int): HighlightColor {
+    return HighlightColor.entries.firstOrNull { it.color.toArgb() == argb } ?: HighlightColor.YELLOW
+}
+
+internal fun legacyHighlightColorOrNull(argb: Int): HighlightColor? {
+    return HighlightColor.entries.firstOrNull { it.color.toArgb() == argb }
+}
+
+internal fun highlightColorTag(argb: Int): String {
+    return legacyHighlightColorOrNull(argb)?.id ?: "custom_${argb.toUInt().toString(16)}"
+}
+
+internal fun highlightColorFromToken(token: String): Pair<HighlightColor, Int?> {
+    val trimmed = token.trim()
+    val parsedArgb = trimmed.toIntOrNull()
+        ?: trimmed.removePrefix("#").takeIf { it.length == 6 || it.length == 8 }?.toLongOrNull(16)?.let { value ->
+            if (trimmed.removePrefix("#").length == 6) (0xFF000000 or value).toInt() else value.toInt()
+        }
+    if (parsedArgb != null) {
+        return legacyHighlightColorForArgb(parsedArgb) to parsedArgb
+    }
+    val legacy = HighlightColor.entries.find { it.id == trimmed } ?: HighlightColor.YELLOW
+    return legacy to null
 }
 
 // --- Persistence Helpers ---
@@ -162,7 +229,9 @@ fun processAndAddHighlight(
         chapterIndex = chapterIndex,
         cfi = newCfi,
         textQuote = newText
-    )
+    ),
+    newColorArgb: Int? = null,
+    newStyle: HighlightStyle = HighlightStyle.BACKGROUND
 ): String {
     return EpubAnnotationSerializer.processAndAddHighlight(
         newCfi = newCfi,
@@ -170,7 +239,9 @@ fun processAndAddHighlight(
         newColor = newColor,
         chapterIndex = chapterIndex,
         currentList = currentList,
-        locator = locator
+        locator = locator,
+        newColorArgb = newColorArgb,
+        newStyle = newStyle
     )
 }
 
@@ -233,87 +304,258 @@ fun SpectrumButton(
 
 @Composable
 fun PaletteManagerDialog(
-    currentPalette: List<HighlightColor>,
-    onSave: (List<HighlightColor>) -> Unit,
+    currentPalette: List<Int>,
+    initialSelection: Int = 0,
+    onSave: (List<Int>) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var tempPalette by remember { mutableStateOf(currentPalette.toMutableList()) }
-    var selectedSlotIndex by remember { mutableIntStateOf(0) }
+    var currentColors by remember { mutableStateOf(sanitizeHighlightPalette(currentPalette)) }
+    var selectedSlot by remember { mutableIntStateOf(initialSelection.coerceIn(0, currentColors.lastIndex)) }
 
-    AlertDialog(
+    val initialActiveColor = Color(currentColors[selectedSlot])
+    val initialHsv = remember(initialActiveColor) {
+        val hsv = FloatArray(3)
+        android.graphics.Color.colorToHSV(initialActiveColor.toArgb(), hsv)
+        hsv
+    }
+
+    var hue by remember { mutableFloatStateOf(initialHsv[0]) }
+    var saturation by remember { mutableFloatStateOf(initialHsv[1]) }
+    var value by remember { mutableFloatStateOf(initialHsv[2]) }
+
+    LaunchedEffect(selectedSlot) {
+        val color = Color(currentColors[selectedSlot])
+        val hsv = FloatArray(3)
+        android.graphics.Color.colorToHSV(color.toArgb(), hsv)
+        hue = hsv[0]
+        saturation = hsv[1]
+        value = hsv[2]
+    }
+
+    val currentColor by remember {
+        derivedStateOf {
+            Color(android.graphics.Color.HSVToColor(255, floatArrayOf(hue, saturation, value)))
+        }
+    }
+
+    LaunchedEffect(currentColor) {
+        val next = currentColors.toMutableList()
+        next[selectedSlot] = currentColor.toArgb()
+        currentColors = next
+    }
+
+    fun updateFromColor(color: Color) {
+        val hsv = FloatArray(3)
+        android.graphics.Color.colorToHSV(color.toArgb(), hsv)
+        hue = hsv[0]
+        saturation = hsv[1]
+        value = hsv[2]
+    }
+
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.dialog_customize_palette), style = MaterialTheme.typography.titleMedium) },
-        text = {
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        val configuration = LocalConfiguration.current
+        val maxDialogHeight = readerModalMaxHeightDp(configuration.screenHeightDp).dp
+
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = Color(0xFF2C2C2C),
+            modifier = Modifier
+                .fillMaxWidth(0.9f)
+                .padding(16.dp)
+                .heightIn(max = maxDialogHeight)
+        ) {
             Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .padding(20.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(stringResource(R.string.palette_tap_slot_to_edit), style = MaterialTheme.typography.bodySmall)
-                Row(
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    modifier = Modifier.fillMaxWidth()
+                Box(
+                    modifier = Modifier
+                        .background(Color(0xFF3E3E3E), RoundedCornerShape(16.dp))
+                        .padding(horizontal = 24.dp, vertical = 8.dp)
                 ) {
-                    tempPalette.forEachIndexed { index, colorEnum ->
-                        val isSelected = index == selectedSlotIndex
+                    Text(
+                        text = stringResource(R.string.highlight_customize_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
+                    )
+                }
+
+                Spacer(Modifier.height(20.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    currentColors.forEachIndexed { index, argb ->
+                        val slotColor = Color(argb)
+                        val isSelected = selectedSlot == index
                         Box(
-                            contentAlignment = Alignment.Center,
                             modifier = Modifier
                                 .size(48.dp)
-                                .background(colorEnum.color, CircleShape)
+                                .clip(CircleShape)
+                                .background(slotColor)
+                                .clickable { selectedSlot = index }
                                 .border(
                                     width = if (isSelected) 3.dp else 1.dp,
-                                    color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    color = if (isSelected) Color.White else Color.Gray,
                                     shape = CircleShape
-                                )
-                                .clip(CircleShape)
-                                .clickable { selectedSlotIndex = index }
+                                ),
+                            contentAlignment = Alignment.Center
                         ) {
                             if (isSelected) {
                                 Icon(
                                     imageVector = Icons.Default.Check,
-                                    contentDescription = stringResource(R.string.content_desc_selected_slot),
-                                    tint = if (colorEnum == HighlightColor.WHITE) Color.Black else Color.White,
-                                    modifier = Modifier.size(24.dp)
+                                    contentDescription = stringResource(R.string.content_desc_selected),
+                                    tint = if (slotColor.luminance() > 0.5f) Color.Black else Color.White
                                 )
                             }
                         }
                     }
                 }
 
-                HorizontalDivider()
+                Spacer(Modifier.height(20.dp))
 
-                // 2. Bottom Grid: Available Colors
-                Text(stringResource(R.string.palette_select_color_for_slot), style = MaterialTheme.typography.bodySmall)
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 40.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.height(200.dp)
+                SpectrumBox(
+                    hue = hue,
+                    saturation = saturation,
+                    currentColor = currentColor,
+                    onHueSatChanged = { h, s -> hue = h; saturation = s },
+                    modifier = Modifier.fillMaxWidth().height(220.dp)
+                )
+
+                Spacer(Modifier.height(20.dp))
+
+                BrightnessSlider(
+                    hue = hue,
+                    saturation = saturation,
+                    value = value,
+                    onValueChanged = { value = it },
+                    modifier = Modifier.fillMaxWidth().height(24.dp).clip(RoundedCornerShape(12.dp))
+                )
+
+                Spacer(Modifier.height(24.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Bottom,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(HighlightColor.entries) { colorOption ->
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(colorOption.color, CircleShape)
-                                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), CircleShape)
-                                .clickable {
-                                    val newList = tempPalette.toMutableList()
-                                    newList[selectedSlotIndex] = colorOption
-                                    tempPalette = newList
-                                }
+                    ColorComparePill(
+                        oldColor = Color(currentPalette.getOrNull(selectedSlot) ?: DefaultHighlightPaletteArgb[selectedSlot]),
+                        newColor = currentColor,
+                        modifier = Modifier.width(64.dp).height(36.dp)
+                    )
+
+                    Column(
+                        modifier = Modifier.weight(1.6f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(stringResource(R.string.theme_color_hex), color = Color.Gray, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                        Spacer(Modifier.height(4.dp))
+                        HexInput(color = currentColor, onHexChanged = { updateFromColor(it) })
+                    }
+
+                    Row(
+                        modifier = Modifier.weight(2.4f),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        RgbInputColumn(label = stringResource(R.string.color_r), value = currentColor.red,
+                            onValueChange = { r -> updateFromColor(currentColor.copy(red = r)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        RgbInputColumn(label = stringResource(R.string.color_g), value = currentColor.green,
+                            onValueChange = { g -> updateFromColor(currentColor.copy(green = g)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        RgbInputColumn(label = stringResource(R.string.color_b), value = currentColor.blue,
+                            onValueChange = { b -> updateFromColor(currentColor.copy(blue = b)) },
+                            modifier = Modifier.weight(1f)
                         )
                     }
                 }
+
+                Spacer(Modifier.height(24.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { updateFromColor(Color(DefaultHighlightPaletteArgb[selectedSlot])) }) {
+                        Text(stringResource(R.string.action_reset), color = Color(0xFFFF5252))
+                    }
+                    Row {
+                        TextButton(onClick = onDismiss) {
+                            Text(stringResource(R.string.action_cancel), color = Color.Gray)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = { onSave(sanitizeHighlightPalette(currentColors)) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White)
+                        ) {
+                            Text(stringResource(R.string.action_save), color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(tempPalette) }) { Text(stringResource(R.string.action_save)) }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
         }
-    )
+    }
+}
+
+fun highlightStyleIconRes(style: HighlightStyle): Int {
+    return when (style) {
+        HighlightStyle.BACKGROUND -> R.drawable.font_background
+        HighlightStyle.UNDERLINE -> R.drawable.format_underlined
+        HighlightStyle.WAVY_UNDERLINE -> R.drawable.format_underlined_squiggle
+        HighlightStyle.STRIKETHROUGH -> R.drawable.strikethrough
+    }
+}
+
+@Composable
+private fun HighlightStyleRow(
+    selectedStyle: HighlightStyle,
+    effectiveText: Color,
+    onStyleSelect: (HighlightStyle) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        HighlightStyle.entries.forEach { style ->
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 4.dp)
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (selectedStyle == style) effectiveText.copy(alpha = 0.16f)
+                        else effectiveText.copy(alpha = 0.06f)
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = if (selectedStyle == style) effectiveText.copy(alpha = 0.55f) else effectiveText.copy(alpha = 0.24f),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .clickable { onStyleSelect(style) },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    painter = painterResource(id = highlightStyleIconRes(style)),
+                    contentDescription = style.id,
+                    tint = effectiveText,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -322,8 +564,9 @@ fun AnnotationBottomSheet(
     highlight: UserHighlight,
     effectiveBg: Color,
     effectiveText: Color,
-    activeHighlightPalette: List<HighlightColor>,
-    onColorChange: (HighlightColor) -> Unit,
+    activeHighlightPalette: List<Int>,
+    onColorChange: (Int) -> Unit,
+    onStyleChange: (HighlightStyle) -> Unit,
     onOpenPaletteManager: () -> Unit,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit,
@@ -333,6 +576,7 @@ fun AnnotationBottomSheet(
     onTranslate: () -> Unit,
     onSearch: () -> Unit
 ) {
+    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var noteText by remember { mutableStateOf(highlight.note ?: "") }
 
@@ -349,10 +593,19 @@ fun AnnotationBottomSheet(
                 .padding(horizontal = 24.dp)
                 .padding(bottom = 24.dp)
         ) {
-            // Top: Highlight Colors
+            // Top: Highlight Style + Colors
+            HighlightStyleRow(
+                selectedStyle = highlight.style,
+                effectiveText = effectiveText,
+                onStyleSelect = {
+                    savePreferredHighlightStyle(context, it)
+                    onStyleChange(it)
+                },
+                modifier = Modifier.padding(bottom = 10.dp)
+            )
             HighlightColorRow(
                 activeHighlightPalette = activeHighlightPalette,
-                selectedColor = highlight.color,
+                selectedColorArgb = highlight.colorArgb ?: highlight.color.color.toArgb(),
                 onColorSelect = onColorChange,
                 onOpenPaletteManager = onOpenPaletteManager,
                 modifier = Modifier.padding(bottom = 16.dp)
@@ -360,9 +613,9 @@ fun AnnotationBottomSheet(
 
             // Middle: Elegant Highlight Snippet Card
             Surface(
-                color = highlight.color.color.copy(alpha = 0.1f),
+                color = highlight.effectiveColor.copy(alpha = 0.1f),
                 shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, highlight.color.color.copy(alpha = 0.3f)),
+                border = BorderStroke(1.dp, highlight.effectiveColor.copy(alpha = 0.3f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(modifier = Modifier.height(IntrinsicSize.Min)) {
@@ -371,7 +624,7 @@ fun AnnotationBottomSheet(
                         modifier = Modifier
                             .width(6.dp)
                             .fillMaxHeight()
-                            .background(highlight.color.color)
+                            .background(highlight.effectiveColor)
                     )
                     Text(
                         text = "\"${highlight.text}\"",
@@ -481,97 +734,6 @@ private fun BottomSheetToolButton(
     }
 }
 
-@Composable
-fun PaginatedTextSelectionMenu(
-    onCopy: () -> Unit,
-    onSelectAll: (() -> Unit)?,
-    onDictionary: () -> Unit,
-    onTranslate: () -> Unit,
-    onSearch: () -> Unit,
-    onHighlight: ((HighlightColor) -> Unit)?,
-    onNote: (() -> Unit)? = null,
-    onDelete: (() -> Unit)?,
-    onTts: (() -> Unit)?,
-    @Suppress("unused") isProUser: Boolean,
-    @Suppress("unused") isOss: Boolean,
-    activeHighlightPalette: List<HighlightColor> = emptyList(),
-    onOpenPaletteManager: (() -> Unit)? = null
-) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        shadowElevation = 6.dp,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-    ) {
-        Column(modifier = Modifier.width(IntrinsicSize.Max).widthIn(min = 180.dp)) {
-            if (onHighlight != null) {
-                HighlightColorRow(
-                    activeHighlightPalette = activeHighlightPalette,
-                    selectedColor = null,
-                    onColorSelect = onHighlight,
-                    onOpenPaletteManager = onOpenPaletteManager
-                )
-                HorizontalDivider()
-            }
-
-            val actions = mutableListOf<MenuActionItem>()
-            actions.add(MenuActionItem(iconRes = R.drawable.copy, label = stringResource(R.string.action_copy), onClick = onCopy))
-            if (onTts != null) {
-                actions.add(MenuActionItem(imageVector = Icons.AutoMirrored.Filled.VolumeUp, label = stringResource(R.string.label_speak), onClick = onTts))
-            }
-            actions.add(MenuActionItem(iconRes = R.drawable.dictionary, label = stringResource(R.string.label_dict), onClick = onDictionary))
-            actions.add(MenuActionItem(iconRes = R.drawable.translate, label = stringResource(R.string.dict_translate), onClick = onTranslate))
-            actions.add(MenuActionItem(iconRes = R.drawable.search, label = stringResource(R.string.action_search), onClick = onSearch))
-
-            if (onNote != null) {
-                actions.add(MenuActionItem(imageVector = Icons.Default.Edit, label = stringResource(R.string.label_note), onClick = onNote))
-            }
-
-            if (onSelectAll != null) {
-                actions.add(MenuActionItem(iconRes = R.drawable.select_all, label = stringResource(R.string.select_all), onClick = onSelectAll))
-            }
-            if (onDelete != null) {
-                actions.add(MenuActionItem(imageVector = Icons.Default.Delete, label = stringResource(R.string.action_remove), onClick = onDelete, isError = true))
-            }
-
-            Column(modifier = Modifier.padding(bottom = 4.dp)) {
-                actions.chunked(3).forEach { rowActions ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 6.dp, vertical = 3.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        rowActions.forEach { action ->
-                            val tint = if (action.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-                            Column(
-                                modifier = Modifier
-                                    .width(56.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { action.onClick() }
-                                    .padding(vertical = 6.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                if (action.imageVector != null) {
-                                    Icon(imageVector = action.imageVector, contentDescription = action.label, tint = tint, modifier = Modifier.size(22.dp))
-                                } else if (action.iconRes != null) {
-                                    Icon(painter = painterResource(id = action.iconRes), contentDescription = action.label, tint = tint, modifier = Modifier.size(22.dp))
-                                }
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(text = action.label, style = MaterialTheme.typography.labelSmall, color = tint, maxLines = 1)
-                            }
-                        }
-                        repeat(3 - rowActions.size) {
-                            Spacer(modifier = Modifier.width(56.dp))
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 private class MenuActionItem(
     val iconRes: Int? = null,
     val imageVector: androidx.compose.ui.graphics.vector.ImageVector? = null,
@@ -583,9 +745,9 @@ private class MenuActionItem(
 @Composable
 fun HighlightColorRow(
     modifier: Modifier = Modifier,
-    activeHighlightPalette: List<HighlightColor>,
-    selectedColor: HighlightColor? = null,
-    onColorSelect: (HighlightColor) -> Unit,
+    activeHighlightPalette: List<Int>,
+    selectedColorArgb: Int? = null,
+    onColorSelect: (Int) -> Unit,
     onOpenPaletteManager: (() -> Unit)? = null,
 ) {
     Row(
@@ -595,30 +757,31 @@ fun HighlightColorRow(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        activeHighlightPalette.forEach { colorEnum ->
+        activeHighlightPalette.forEach { argb ->
+            val swatchColor = Color(argb)
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .padding(horizontal = 4.dp)
                     .size(28.dp)
-                    .testTag("HighlightColor_${colorEnum.id}")
-                    .clip(CircleShape) // 1. Clip shape for ripple
-                    .background(colorEnum.color) // 2. Apply background
+                    .testTag("HighlightColor_${highlightColorTag(argb)}")
+                    .clip(CircleShape)
+                    .background(swatchColor)
                     .clickable {
-                        Timber.d("HighlightColorRow: Color clicked -> ${colorEnum.name}")
-                        onColorSelect(colorEnum)
-                    } // 3. Add clickable (ripple)
-                    .border( // 4. Add border on top
-                        width = if (selectedColor == colorEnum) 3.dp else 1.dp,
-                        color = if (selectedColor == colorEnum) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline.copy(alpha=0.3f),
+                        Timber.d("HighlightColorRow: Color clicked -> ${highlightColorTag(argb)}")
+                        onColorSelect(argb)
+                    }
+                    .border(
+                        width = if (selectedColorArgb == argb) 3.dp else 1.dp,
+                        color = if (selectedColorArgb == argb) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline.copy(alpha=0.3f),
                         shape = CircleShape
                     )
             ) {
-                if (selectedColor == colorEnum) {
+                if (selectedColorArgb == argb) {
                     Icon(
                         imageVector = Icons.Default.Check,
                         contentDescription = stringResource(R.string.content_desc_selected),
-                        tint = if (colorEnum == HighlightColor.WHITE || colorEnum == HighlightColor.YELLOW) Color.Black else Color.White,
+                        tint = if (swatchColor.luminance() > 0.5f) Color.Black else Color.White,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -642,17 +805,22 @@ fun PaginatedTextSelectionMenu(
     onDictionary: () -> Unit,
     onTranslate: () -> Unit,
     onSearch: () -> Unit,
-    onHighlight: ((HighlightColor) -> Unit)?,
-    onNote: (() -> Unit)? = null,
+    onHighlight: ((Int, HighlightStyle) -> Unit)?,
+    onNote: ((HighlightStyle) -> Unit)? = null,
     onDelete: (() -> Unit)?,
     onTts: (() -> Unit)?,
     @Suppress("unused") isProUser: Boolean,
     @Suppress("unused") isOss: Boolean,
-    activeHighlightPalette: List<HighlightColor> = emptyList(),
+    activeHighlightPalette: List<Int> = emptyList(),
     onOpenPaletteManager: (() -> Unit)? = null,
     existingNote: String? = null,
-    selectedColor: HighlightColor? = null
+    selectedColorArgb: Int? = null,
+    selectedStyle: HighlightStyle = HighlightStyle.BACKGROUND
 ) {
+    val context = LocalContext.current
+    var selectedHighlightStyle by remember(selectedStyle) {
+        mutableStateOf(if (selectedStyle == HighlightStyle.BACKGROUND) loadPreferredHighlightStyle(context) else selectedStyle)
+    }
     Surface(
         shape = RoundedCornerShape(12.dp),
         shadowElevation = 6.dp,
@@ -660,12 +828,23 @@ fun PaginatedTextSelectionMenu(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(modifier = Modifier.width(IntrinsicSize.Max).widthIn(min = 180.dp)) {
-            // 1. Colors Row
+            // 1. Highlight style and colors row
             if (onHighlight != null) {
+                HighlightStyleRow(
+                    selectedStyle = selectedHighlightStyle,
+                    effectiveText = MaterialTheme.colorScheme.onSurface,
+                    onStyleSelect = {
+                        selectedHighlightStyle = it
+                        savePreferredHighlightStyle(context, it)
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp, bottom = 2.dp)
+                )
                 HighlightColorRow(
                     activeHighlightPalette = activeHighlightPalette,
-                    selectedColor = selectedColor,
-                    onColorSelect = onHighlight,
+                    selectedColorArgb = selectedColorArgb,
+                    onColorSelect = { onHighlight(it, selectedHighlightStyle) },
                     onOpenPaletteManager = onOpenPaletteManager
                 )
                 HorizontalDivider()
@@ -725,7 +904,7 @@ fun PaginatedTextSelectionMenu(
 
             if (onNote != null) {
                 val noteLabel = if (existingNote.isNullOrBlank()) stringResource(R.string.label_note) else stringResource(R.string.label_edit)
-                actions.add(MenuActionItem(imageVector = Icons.Default.Edit, label = noteLabel, onClick = onNote))
+                actions.add(MenuActionItem(imageVector = Icons.Default.Edit, label = noteLabel, onClick = { onNote(selectedHighlightStyle) }))
             }
 
             if (onSelectAll != null) {

@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -166,6 +167,42 @@ class EpubParserUnitTest {
     }
 
     @Test
+    fun `extraction metadata cache drops heavy cover and chapter content but keeps image paths`() {
+        val parser = EpubParser(contextWithCache(temp.newFolder("cache-shape")))
+        val method = parser.javaClass.getDeclaredMethod("toExtractionMetadataCache", EpubBook::class.java).apply {
+            isAccessible = true
+        }
+        val chapter = EpubChapter(
+            chapterId = "chapter",
+            absPath = "OEBPS/chapter.xhtml",
+            title = "Chapter",
+            htmlFilePath = "OEBPS/chapter.xhtml",
+            plainTextContent = "Readable chapter text",
+            htmlContent = "<p>Readable chapter text</p>"
+        )
+        val book = EpubBook(
+            fileName = "book.epub",
+            title = "Book",
+            author = "Author",
+            language = "en",
+            coverImage = mockk(),
+            chapters = listOf(chapter),
+            images = listOf(EpubImage("OEBPS/images/picture.jpg")),
+            css = mapOf("OEBPS/style.css" to "body { color: black; }")
+        )
+
+        val cached = method.invoke(parser, book) as EpubBook
+
+        assertNotNull(book.coverImage)
+        assertNull(cached.coverImage)
+        assertEquals("", cached.chapters.single().plainTextContent)
+        assertEquals("", cached.chapters.single().htmlContent)
+        assertEquals(chapter.plainTextContent.length, cached.chapters.single().plainTextLength)
+        assertEquals(book.images, cached.images)
+        assertEquals(emptyMap<String, String>(), cached.css)
+    }
+
+    @Test
     fun `createEpubBook reuses active extraction cache on matching warm open`() = runTest {
         val cacheDir = temp.newFolder("cache-warm-open")
         val parser = EpubParser(contextWithCache(cacheDir))
@@ -177,6 +214,12 @@ class EpubParserUnitTest {
             originalBookNameHint = "warm.epub"
         )
         val activeDir = ImportedFileCache.activeBookDir(contextWithCache(cacheDir), "warm-book")
+        val cachedMetadata = File(activeDir, "book_metadata.json").readText()
+        assertTrue(first.chapters.first().htmlContent.contains("Ignored HTML Title"))
+        assertTrue(first.chapters.first().plainTextContent.contains("One"))
+        assertFalse(cachedMetadata.contains("Ignored HTML Title"))
+        assertFalse(cachedMetadata.contains("body { color: black; }"))
+        assertFalse(File(activeDir, "book_metadata.json.tmp").exists())
         File(activeDir, "sentinel.txt").writeText("still here")
 
         val second = parser.createEpubBook(
@@ -188,9 +231,46 @@ class EpubParserUnitTest {
 
         assertEquals(first.title, second.title)
         assertEquals(first.chapters.size, second.chapters.size)
+        assertEquals(first.chapters.first().plainTextLength, second.chapters.first().plainTextLength)
+        assertEquals(first.css, second.css)
         assertTrue(File(activeDir, "sentinel.txt").isFile)
     }
 
+    @Test
+    fun `createEpubBook ignores oversized legacy extraction metadata before reading`() = runTest {
+        val cacheDir = temp.newFolder("cache-oversized-book-metadata")
+        val context = contextWithCache(cacheDir)
+        val parser = EpubParser(context)
+        val activeDir = ImportedFileCache.ensureActiveBookDir(context, "oversized-book")
+        File(activeDir, "OEBPS").mkdirs()
+        File(activeDir, "sentinel.txt").writeText("stale extraction")
+        File(activeDir, "epub_cache_manifest.json").writeText(
+            """
+                {
+                  "bookId":"oversized-book",
+                  "originalBookNameHint":"oversized.epub",
+                  "parserVersion":1,
+                  "parseContent":true,
+                  "shouldUseToc":true,
+                  "sourceFingerprint":null
+                }
+            """.trimIndent()
+        )
+        File(activeDir, "book_metadata.json").outputStream().use { output ->
+            val chunk = ByteArray(1024) { 'x'.code.toByte() }
+            repeat(5 * 1024) { output.write(chunk) }
+        }
+
+        val book = parser.createEpubBook(
+            inputStream = ByteArrayInputStream(minimalEpubBytesWithoutOptionalMetadata()),
+            bookId = "oversized-book",
+            shouldUseToc = true,
+            originalBookNameHint = "oversized.epub"
+        )
+
+        assertEquals("oversized", book.title)
+        assertFalse(File(activeDir, "sentinel.txt").isFile)
+    }
     @Test
     fun `createEpubBook invalidates active extraction cache when source fingerprint changes`() = runTest {
         val cacheDir = temp.newFolder("cache-source-change")

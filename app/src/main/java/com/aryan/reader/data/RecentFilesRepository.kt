@@ -37,6 +37,7 @@ import timber.log.Timber
 import com.aryan.reader.BookImporter
 import com.aryan.reader.cloudSyncAnnotationSummary
 import com.aryan.reader.paginatedreader.Locator
+import com.aryan.reader.paginatedreader.data.BookCacheDatabase
 import com.aryan.reader.pdf.PdfRichTextRepository
 import com.aryan.reader.epub.ImportedFileCache
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +50,7 @@ import java.io.FileOutputStream
 import com.aryan.reader.pdf.data.PdfAnnotationRepository
 import com.aryan.reader.pdf.data.PageLayoutRepository
 import com.aryan.reader.pdf.data.PdfTextBoxRepository
+import com.aryan.reader.pdf.data.PdfTextRepository
 import com.aryan.reader.shared.pdf.SharedPdfAnnotationSidecarCodec
 import org.json.JSONObject
 import org.json.JSONArray
@@ -72,6 +74,8 @@ class RecentFilesRepository(private val context: Context) {
     private val pageLayoutRepository = PageLayoutRepository(context)
     private val pdfTextBoxRepository = PdfTextBoxRepository(context)
     private val pdfHighlightRepository = com.aryan.reader.pdf.data.PdfHighlightRepository(context)
+    private val pdfTextRepository by lazy { PdfTextRepository(context) }
+    private val bookCacheDao by lazy { BookCacheDatabase.getDatabase(context).bookCacheDao() }
 
     val activeShelvesFlow = database.shelfDao().getAllActiveShelves()
     val shelfCrossRefsFlow = database.shelfDao().getAllBookShelfCrossRefs()
@@ -146,6 +150,10 @@ class RecentFilesRepository(private val context: Context) {
 
     suspend fun removeTagFromBook(bookId: String, tagId: String) = withContext(Dispatchers.IO) {
         AppDatabase.getDatabase(context).tagDao().removeTagFromBook(tagId, bookId)
+    }
+
+    suspend fun deleteTag(tagId: String) = withContext(Dispatchers.IO) {
+        AppDatabase.getDatabase(context).tagDao().deleteTag(tagId)
     }
 
     suspend fun clearAllLocalData() = withContext(Dispatchers.IO) {
@@ -241,6 +249,11 @@ class RecentFilesRepository(private val context: Context) {
                 isDeleted = item.isDeleted,
                 sourceFolderUri = item.sourceFolderUri ?: existingItem.sourceFolderUri,
                 highlights = item.highlightsJson ?: existingItem.highlights,
+                customName = when {
+                    item.customName != null -> item.customName
+                    item.lastModifiedTimestamp > existingItem.lastModifiedTimestamp -> null
+                    else -> existingItem.customName
+                },
                 fileSize = if (item.fileSize > 0) item.fileSize else existingItem.fileSize,
                 fileContentModifiedTimestamp = if (item.fileContentModifiedTimestamp > 0) item.fileContentModifiedTimestamp else existingItem.fileContentModifiedTimestamp,
                 seriesName = if (folderFileChanged) {
@@ -322,7 +335,8 @@ class RecentFilesRepository(private val context: Context) {
         bookId: String,
         metadata: BookMetadataEdit,
         fileSize: Long = 0L,
-        fileContentModifiedTimestamp: Long = 0L
+        fileContentModifiedTimestamp: Long = 0L,
+        coverImagePath: String? = null
     ) = withContext(Dispatchers.IO) {
         val currentTime = System.currentTimeMillis()
         recentFileDao.updateUserEditableMetadata(
@@ -332,6 +346,7 @@ class RecentFilesRepository(private val context: Context) {
             seriesName = metadata.seriesName,
             seriesIndex = metadata.seriesIndex,
             description = metadata.description,
+            coverImagePath = coverImagePath,
             fileSize = fileSize,
             fileContentModifiedTimestamp = fileContentModifiedTimestamp,
             timestamp = currentTime
@@ -339,13 +354,20 @@ class RecentFilesRepository(private val context: Context) {
         Timber.d("Updated user-editable metadata for $bookId")
     }
 
+    suspend fun updateCustomName(bookId: String, customName: String?) = withContext(Dispatchers.IO) {
+        val currentTime = System.currentTimeMillis()
+        recentFileDao.updateCustomName(bookId, customName, currentTime)
+        Timber.d("Updated custom display name for $bookId")
+    }
+
     suspend fun restoreOriginalMetadata(
         bookId: String,
         fileSize: Long = 0L,
-        fileContentModifiedTimestamp: Long = 0L
+        fileContentModifiedTimestamp: Long = 0L,
+        coverImagePath: String? = null
     ) = withContext(Dispatchers.IO) {
         val currentTime = System.currentTimeMillis()
-        recentFileDao.restoreOriginalMetadata(bookId, fileSize, fileContentModifiedTimestamp, currentTime)
+        recentFileDao.restoreOriginalMetadata(bookId, coverImagePath, fileSize, fileContentModifiedTimestamp, currentTime)
         Timber.d("Restored original metadata for $bookId")
     }
 
@@ -587,17 +609,7 @@ class RecentFilesRepository(private val context: Context) {
         )
 
         filesToRemove.forEach { item ->
-            item.coverImagePath?.let { deleteCachedCover(it) }
-            try {
-                pdfAnnotationRepository.getAnnotationFileForSync(item.bookId)?.delete()
-                pdfRichTextRepository.getFileForSync(item.bookId).delete()
-                pageLayoutRepository.getLayoutFile(item.bookId).delete()
-                pdfTextBoxRepository.getFileForSync(item.bookId).delete()
-                pdfHighlightRepository.getFileForSync(item.bookId).delete()
-                ImportedFileCache.clearBookCache(context, item.bookId)
-            } catch (e: Exception) {
-                Timber.e(e, "Error during local cleanup for detached folder book ${item.bookId}")
-            }
+            cleanupLocalBookArtifacts(item, "detached folder book")
         }
     }
 
@@ -732,24 +744,13 @@ class RecentFilesRepository(private val context: Context) {
             if (itemsToRemove.isNotEmpty()) {
                 Timber.d("DeleteDebug: DAO - Permanently deleting ${itemsToRemove.size} files.")
                 itemsToRemove.forEach { item ->
-                    item.coverImagePath?.let { deleteCachedCover(it) }
                     try {
                         item.uriString?.let { bookImporter.deleteBookByUriString(it) }
                     } catch (e: Exception) {
                         Timber.w("DeleteDebug: Physical file deletion failed (likely already gone) for ${item.bookId}: ${e.message}")
                     }
 
-                    try {
-                        pdfAnnotationRepository.getAnnotationFileForSync(item.bookId)?.delete()
-                        pdfRichTextRepository.getFileForSync(item.bookId).delete()
-                        pageLayoutRepository.getLayoutFile(item.bookId).delete()
-                        pdfTextBoxRepository.getFileForSync(item.bookId).delete()
-                        pdfHighlightRepository.getFileForSync(item.bookId).delete()
-
-                        ImportedFileCache.clearBookCache(context, item.bookId)
-                    } catch (e: Exception) {
-                        Timber.e(e, "Error during deep cleanup of sidecars for ${item.bookId}: ${e.message}")
-                    }
+                    cleanupLocalBookArtifacts(item, "permanent deletion")
                 }
                 recentFileDao.deleteFilePermanently(itemsToRemove.map { it.bookId })
                 Timber.d("Permanently removed recent files from DB.")
@@ -757,6 +758,30 @@ class RecentFilesRepository(private val context: Context) {
                 Timber.w("DeleteDebug: DAO - Files not found for permanent deletion.")
             }
         }
+    }
+
+    private suspend fun cleanupLocalBookArtifacts(item: RecentFileEntity, reason: String) {
+        item.coverImagePath?.let { coverPath ->
+            runCatching { deleteCachedCover(coverPath) }
+                .onFailure { Timber.e(it, "Error deleting cached cover for $reason ${item.bookId}") }
+        }
+
+        runCatching { pdfAnnotationRepository.getAnnotationFileForSync(item.bookId)?.delete() }
+            .onFailure { Timber.e(it, "Error deleting PDF ink sidecar for $reason ${item.bookId}") }
+        runCatching { pdfRichTextRepository.getFileForSync(item.bookId).delete() }
+            .onFailure { Timber.e(it, "Error deleting PDF rich text sidecar for $reason ${item.bookId}") }
+        runCatching { pageLayoutRepository.getLayoutFile(item.bookId).delete() }
+            .onFailure { Timber.e(it, "Error deleting PDF page layout sidecar for $reason ${item.bookId}") }
+        runCatching { pdfTextBoxRepository.getFileForSync(item.bookId).delete() }
+            .onFailure { Timber.e(it, "Error deleting PDF text box sidecar for $reason ${item.bookId}") }
+        runCatching { pdfHighlightRepository.getFileForSync(item.bookId).delete() }
+            .onFailure { Timber.e(it, "Error deleting PDF highlight sidecar for $reason ${item.bookId}") }
+        runCatching { pdfTextRepository.clearBookText(item.bookId) }
+            .onFailure { Timber.e(it, "Error clearing PDF text cache for $reason ${item.bookId}") }
+        runCatching { bookCacheDao.deleteEntireBookCache(item.bookId) }
+            .onFailure { Timber.e(it, "Error clearing pagination cache for $reason ${item.bookId}") }
+        runCatching { ImportedFileCache.clearBookCache(context, item.bookId) }
+            .onFailure { Timber.e(it, "Error clearing imported file cache for $reason ${item.bookId}") }
     }
 
     private fun getCoverCacheDirInternal(): File {
@@ -768,7 +793,7 @@ class RecentFilesRepository(private val context: Context) {
 
     suspend fun saveCoverToCache(bitmap: Bitmap, uri: Uri): String? = withContext(Dispatchers.IO) {
         val cacheDir = getCoverCacheDirInternal()
-        val filename = "cover_${uri.toString().hashCode()}.png"
+        val filename = "cover_${uri.toString().hashCode()}_${System.currentTimeMillis()}.png"
         val file = File(cacheDir, filename)
         var fos: FileOutputStream? = null
         var scaledCopy: Bitmap? = null
@@ -833,7 +858,7 @@ class RecentFilesRepository(private val context: Context) {
 
     private fun saveEmbeddedCoverBytesToCache(bytes: ByteArray, uri: Uri, extension: String): String? {
         val cacheDir = getCoverCacheDirInternal()
-        val filename = "cover_${uri.toString().hashCode()}.$extension"
+        val filename = "cover_${uri.toString().hashCode()}_${System.currentTimeMillis()}.$extension"
         val file = File(cacheDir, filename)
         return try {
             deleteCoverCacheVariants(uri)
@@ -848,9 +873,10 @@ class RecentFilesRepository(private val context: Context) {
     }
 
     private fun deleteCoverCacheVariants(uri: Uri) {
-        val prefix = "cover_${uri.toString().hashCode()}."
+        val exactPrefix = "cover_${uri.toString().hashCode()}."
+        val versionedPrefix = "cover_${uri.toString().hashCode()}_"
         getCoverCacheDirInternal().listFiles()
-            ?.filter { it.isFile && it.name.startsWith(prefix) }
+            ?.filter { it.isFile && (it.name.startsWith(exactPrefix) || it.name.startsWith(versionedPrefix)) }
             ?.forEach { runCatching { it.delete() } }
     }
 

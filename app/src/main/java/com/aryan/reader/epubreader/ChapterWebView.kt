@@ -35,6 +35,7 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,6 +55,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -73,6 +75,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.IntOffset
@@ -251,6 +254,17 @@ private fun buildCustomFontCssForWebView(customFontPath: String?, phase: String)
     return css
 }
 
+private const val TxtFormatTraceTag = "TxtFormatTrace"
+
+private fun String.txtFormatTracePreview(maxLength: Int = 220): String {
+    return replace("\\", "\\\\")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+        .let { if (it.length <= maxLength) it else it.take(maxLength) + "..." }
+        .replace("\"", "\\\"")
+}
+
 private fun getJsToInject(context: Context): String {
     return try {
         context.assets.open("epub_reader.js").use { inputStream ->
@@ -298,12 +312,12 @@ class TtsJsBridge(
 
 @Suppress("unused")
 class HighlightJsBridge(
-    private val onCreateCallback: (String, String, String) -> Unit, // Renamed to avoid recursion
+    private val onCreateCallback: (String, String, String, HighlightStyle) -> Unit,
     private val onClickCallback: ((String, String, Int, Int, Int, Int) -> Unit)? = null // Renamed
 ) {
     @JavascriptInterface
-    fun onHighlightCreated(cfi: String, text: String, colorId: String) {
-        onCreateCallback(cfi, text, colorId) // Calls the lambda property
+    fun onHighlightCreated(cfi: String, text: String, colorId: String, styleId: String) {
+        onCreateCallback(cfi, text, colorId, HighlightStyle.fromId(styleId))
     }
 
     @JavascriptInterface
@@ -433,7 +447,8 @@ private data class CustomMenuState(
     val cfi: String? = null,
     val isExistingHighlight: Boolean = false,
     val note: String? = null,
-    val selectedColor: HighlightColor? = null
+    val selectedColor: HighlightColor? = null,
+    val selectedStyle: HighlightStyle = HighlightStyle.BACKGROUND
 )
 
 internal fun highlightsJsonForWebView(userHighlights: List<UserHighlight>): String {
@@ -445,6 +460,11 @@ internal fun highlightsJsonForWebView(userHighlights: List<UserHighlight>): Stri
         obj.put("text", highlight.text)
         obj.put("cssClass", highlight.color.cssClass)
         obj.put("colorId", highlight.color.id)
+        obj.put("style", highlight.style.id)
+        highlight.colorArgb?.let { argb ->
+            obj.put("colorArgb", argb)
+            obj.put("colorCss", colorCssForArgb(argb))
+        }
         obj.put("chapterIndex", highlight.chapterIndex)
         obj.put(
             "locator",
@@ -464,6 +484,10 @@ internal fun highlightsJsonForWebView(userHighlights: List<UserHighlight>): Stri
         jsonArray.put(obj)
     }
     return jsonArray.toString()
+}
+
+private fun colorCssForArgb(argb: Int): String {
+    return String.format("#%06X", 0xFFFFFF and argb)
 }
 
 @Suppress("unused")
@@ -513,7 +537,7 @@ fun ChapterWebView(
     baseUrl: String,
     totalChunks: Int,
     userHighlights: List<UserHighlight>,
-    onHighlightCreated: (String, String, String) -> Unit,
+    onHighlightCreated: (String, String, String, HighlightStyle) -> Unit,
     onHighlightDeleted: (String) -> Unit,
     onChunkRequested: (Int) -> Unit,
     chapterTitle: String,
@@ -567,8 +591,8 @@ fun ChapterWebView(
     currentTextAlign: ReaderTextAlign,
     onHighlightClicked: () -> Unit,
     onAutoScrollChapterEnd: () -> Unit = {},
-    activeHighlightPalette: List<HighlightColor>,
-    onUpdatePalette: (Int, HighlightColor) -> Unit,
+    activeHighlightPalette: List<Int>,
+    onUpdatePalette: (Int, Int) -> Unit,
     onInternalLinkClick: (String) -> Unit,
     onWebViewDisposed: (WebView) -> Unit = {},
     activeTextureId: String? = null,
@@ -717,8 +741,8 @@ fun ChapterWebView(
 
                     addJavascriptInterface(
                         HighlightJsBridge(
-                            onCreateCallback = { cfi, text, colorId ->
-                                this.post { onHighlightCreated(cfi, text, colorId) }
+                            onCreateCallback = { cfi, text, colorId, style ->
+                                this.post { onHighlightCreated(cfi, text, colorId, style) }
                             },
                             onClickCallback = { cfi, text, left, top, right, bottom ->
                                 this.post {
@@ -805,6 +829,11 @@ fun ChapterWebView(
                                         )
                                     }
 
+                                    message.startsWith("TxtFormatTrace:") -> {
+                                        Timber.tag(TxtFormatTraceTag)
+                                            .d("JS -> ${message.substringAfter("TxtFormatTrace: ")}")
+                                    }
+
                                     message.startsWith("NavDiag:") -> {
                                         Timber.tag("NavDiag")
                                             .d("JS -> ${message.substringAfter("NavDiag: ")}")
@@ -887,7 +916,7 @@ fun ChapterWebView(
                             }
                             if (url != null) {
                                 Timber.tag(TAG_LINK_NAV)
-                                    .d("[INTERNAL-LINK-PASSED] url='$url' from chapter '$chapterTitle' — allowing WebView to handle")
+                                    .d("[INTERNAL-LINK-PASSED] url='$url' from chapter '$chapterTitle' - allowing WebView to handle")
                             }
                             return false
                         }
@@ -1017,6 +1046,29 @@ fun ChapterWebView(
 
                             view?.evaluateJavascript(
                                 "javascript:window.updateReaderStyles($currentFontSize, $currentLineHeight, '$fontNameForJs', '${currentTextAlign.cssValue}', $currentParagraphGap, $currentImageSize, $currentHorizontalMargin, $currentVerticalMargin);",
+                                null
+                            )
+
+                            view?.evaluateJavascript(
+                                """
+                                    javascript:setTimeout(function() {
+                                        var p = document.querySelector('p.reader-txt-preformatted') || document.querySelector('p');
+                                        if (!p) {
+                                            console.log('TxtFormatTrace: event=android_webview_computed noParagraph=true');
+                                            return;
+                                        }
+                                        var style = window.getComputedStyle(p);
+                                        var textPreview = (p.textContent || '').slice(0, 180).replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t');
+                                        console.log(
+                                            'TxtFormatTrace: event=android_webview_computed class=' + p.className +
+                                            ' whiteSpace=' + style.whiteSpace +
+                                            ' textIndent=' + style.textIndent +
+                                            ' textAlign=' + style.textAlign +
+                                            ' fontFamily=' + style.fontFamily +
+                                            ' textPreview=' + textPreview
+                                        );
+                                    }, 250);
+                                """.trimIndent(),
                                 null
                             )
 
@@ -1158,6 +1210,17 @@ fun ChapterWebView(
                     Timber.d(
                         "WebView loading initial data with base URL: $baseUrl (Key: $key)"
                     )
+                    val txtTraceContainsPreWrap = initialHtmlContent.contains("white-space: pre-wrap") || initialHtmlContent.contains("white-space:pre-wrap")
+                    val txtTraceContainsTxtClass = initialHtmlContent.contains("reader-txt-preformatted")
+                    val txtTraceContainsInlinePreWrap = initialHtmlContent.contains("white-space: pre-wrap !important")
+                    val txtTraceContainsAlbumMarker = initialHtmlContent.contains("===========CD 1=============")
+                    Timber.tag(TxtFormatTraceTag).d(
+                        "event=android_webview_load key=${key.toString().txtFormatTracePreview()} baseUrl=${baseUrl.orEmpty().txtFormatTracePreview()} " +
+                            "htmlChars=${initialHtmlContent.length} newlines=${initialHtmlContent.count { it == '\n' }} " +
+                            "containsPreWrap=$txtTraceContainsPreWrap containsTxtClass=$txtTraceContainsTxtClass " +
+                            "containsInlinePreWrap=$txtTraceContainsInlinePreWrap containsAlbumMarker=$txtTraceContainsAlbumMarker " +
+                            "preview=${initialHtmlContent.txtFormatTracePreview()}"
+                    )
                     loadDataWithBaseURL(baseUrl, initialHtmlContent, "text/html", "UTF-8", null)
                 }
                 webView
@@ -1291,6 +1354,9 @@ fun ChapterWebView(
                     }
                 }
 
+            var selectedHighlightStyle by remember(state.cfi, state.selectedStyle) {
+                mutableStateOf(if (state.selectedStyle == HighlightStyle.BACKGROUND) loadPreferredHighlightStyle(context) else state.selectedStyle)
+            }
             Popup(
                 popupPositionProvider = popupPositionProvider, onDismissRequest = {
                     state.finishActionModeCallback()
@@ -1310,28 +1376,69 @@ fun ChapterWebView(
                     ) {
                         Row(
                             modifier = Modifier
+                                .padding(top = 12.dp, bottom = 2.dp, start = 10.dp, end = 10.dp)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            HighlightStyle.entries.forEach { style ->
+                                Box(
+                                    modifier = Modifier
+                                        .padding(horizontal = 3.dp)
+                                        .size(32.dp)
+                                        .background(
+                                            if (selectedHighlightStyle == style) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (selectedHighlightStyle == style) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .pointerInput(style) {
+                                            detectTapGestures {
+                                                selectedHighlightStyle = style
+                                                savePreferredHighlightStyle(context, style)
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        painter = painterResource(id = highlightStyleIconRes(style)),
+                                        contentDescription = style.id,
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier
                                 .padding(vertical = 8.dp, horizontal = 10.dp)
                                 .fillMaxWidth(),
                             horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            activeHighlightPalette.forEachIndexed { index, colorEnum ->
+                            activeHighlightPalette.forEachIndexed { index, colorArgb ->
+                                val colorCss = colorCssForArgb(colorArgb)
+                                val colorEnum = legacyHighlightColorForArgb(colorArgb)
                                 Box(
                                     modifier = Modifier
                                         .padding(horizontal = 4.dp)
                                         .size(28.dp)
-                                        .background(colorEnum.color, CircleShape)
-                                        .pointerInput(colorEnum) {
+                                        .background(androidx.compose.ui.graphics.Color(colorArgb), CircleShape)
+                                        .pointerInput(colorArgb) {
                                             detectTapGestures(onTap = {
                                                 Timber.d("Kotlin: Color clicked. Existing? ${state.isExistingHighlight}")
                                                 if (state.isExistingHighlight && state.cfi != null) {
                                                     localWebViewRef?.evaluateJavascript(
-                                                        "javascript:window.HighlightBridgeHelper.updateHighlightStyle('${state.cfi}', '${colorEnum.cssClass}', '${colorEnum.id}');",
+                                                        "javascript:window.HighlightBridgeHelper.updateHighlightStyle('${state.cfi}', '${colorEnum.cssClass}', '$colorArgb', '$colorCss', '${selectedHighlightStyle.id}');",
                                                         null
                                                     )
                                                 } else {
                                                     localWebViewRef?.evaluateJavascript(
-                                                        "javascript:window.HighlightBridgeHelper.createUserHighlight('${colorEnum.cssClass}', '${colorEnum.id}');",
+                                                        "javascript:window.HighlightBridgeHelper.createUserHighlight('${colorEnum.cssClass}', '$colorArgb', '$colorCss', '${selectedHighlightStyle.id}');",
                                                         null
                                                     )
                                                 }
@@ -1398,13 +1505,14 @@ fun ChapterWebView(
                                     }
                                     customMenuState = null
                                 },
-                                onNote = {
+                                onNote = { style ->
+                                    savePreferredHighlightStyle(context, style)
                                     if (state.isExistingHighlight && state.cfi != null) {
                                         onNoteRequested(state.cfi)
                                     } else {
                                         onNoteRequested(null)
                                         localWebViewRef?.evaluateJavascript(
-                                            "javascript:window.HighlightBridgeHelper.createUserHighlight('${HighlightColor.YELLOW.cssClass}', '${HighlightColor.YELLOW.id}');", null
+                                            "javascript:window.HighlightBridgeHelper.createUserHighlight('${HighlightColor.YELLOW.cssClass}', '${HighlightColor.YELLOW.color.toArgb()}', '${colorCssForArgb(HighlightColor.YELLOW.color.toArgb())}', '${style.id}');", null
                                         )
                                     }
                                     state.finishActionModeCallback()
@@ -1443,7 +1551,7 @@ fun ChapterWebView(
                                 isProUser = isProUser,
                                 isOss = isOss,
                                 existingNote = state.note,
-                                selectedColor = state.selectedColor
+                                selectedColorArgb = state.selectedColor?.color?.toArgb()
                             )
                         }
                     }

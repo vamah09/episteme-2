@@ -13,8 +13,10 @@ import androidx.compose.ui.unit.dp
 import com.aryan.reader.shared.reader.ReaderLayoutSignature
 import com.aryan.reader.shared.reader.ReaderPage
 import com.aryan.reader.shared.reader.ReaderReadingMode
+import com.aryan.reader.shared.reader.ReaderSettings
 import com.aryan.reader.shared.reader.ReaderViewportSpec
 import com.aryan.reader.shared.reader.SharedEpubBook
+import com.aryan.reader.shared.reader.layoutSignature
 
 internal data class DesktopEpubPaginationRequest(
     val bookId: String,
@@ -22,7 +24,8 @@ internal data class DesktopEpubPaginationRequest(
     val layoutSignature: ReaderLayoutSignature,
     val viewport: ReaderViewportSpec,
     val density: DesktopEpubPaginationDensity,
-    val cacheGeneration: Int
+    val cacheGeneration: Int,
+    val focusChapterIndex: Int
 )
 
 internal data class DesktopEpubPaginationDensity(
@@ -44,9 +47,18 @@ internal fun desktopMeasuredPaginationReady(
 
 internal fun desktopPaginatedLayoutReadyForDisplay(
     readingMode: ReaderReadingMode,
-    measuredPagesApplied: Boolean
+    measuredPagesApplied: Boolean,
+    warmPagesApplied: Boolean = false
 ): Boolean {
-    return readingMode != ReaderReadingMode.PAGINATED || measuredPagesApplied
+    return readingMode != ReaderReadingMode.PAGINATED || measuredPagesApplied || warmPagesApplied
+}
+
+internal fun desktopMeasuredPaginationRequestStillCurrent(
+    request: DesktopEpubPaginationRequest,
+    settings: ReaderSettings
+): Boolean {
+    return settings.readingMode == ReaderReadingMode.PAGINATED &&
+        settings.layoutSignature() == request.layoutSignature
 }
 
 internal fun desktopPagesWithMeasuredChapter(
@@ -69,16 +81,39 @@ internal fun List<ReaderPage>.firstPageIndexForChapter(chapterIndex: Int): Int? 
 }
 
 internal fun SharedEpubBook.desktopPaginationContentSignature(): Int {
-    return chapters.fold(31 * id.hashCode() + css.hashCode()) { acc, chapter ->
+    return chapters.fold(31 * id.hashCode() + css.keys.hashCode() + css.values.sumOf { it.length }) { acc, chapter ->
         31 * acc +
             chapter.id.hashCode() +
             chapter.plainText.length +
             chapter.plainText.hashCode() +
-            chapter.semanticBlocks.hashCode() +
+            chapter.semanticBlocks.size +
             chapter.htmlContent.length +
-            chapter.htmlContent.hashCode() +
             chapter.baseHref.orEmpty().hashCode()
     }
+}
+
+internal fun desktopChapterPaginationPriorityOrder(
+    chapterCount: Int,
+    currentChapterIndex: Int
+): List<Int> {
+    if (chapterCount <= 0) return emptyList()
+    val current = currentChapterIndex.coerceIn(0, chapterCount - 1)
+    val ordered = mutableListOf(current)
+    for (offset in 1 until chapterCount) {
+        val next = current + offset
+        val previous = current - offset
+        if (next < chapterCount) ordered += next
+        if (previous >= 0) ordered += previous
+    }
+    return ordered
+}
+
+internal fun desktopMeasuredChapterCount(pages: List<ReaderPage>): Int {
+    return pages
+        .filter { it.semanticBlocks.isNotEmpty() }
+        .map { it.chapterIndex }
+        .distinct()
+        .size
 }
 
 @Composable

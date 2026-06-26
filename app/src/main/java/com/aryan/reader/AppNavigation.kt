@@ -87,10 +87,14 @@ fun shouldInterceptAppNavBack(
     isCurrentEntryResumed: Boolean
 ): Boolean {
     if (!hasPreviousBackStackEntry || !isCurrentEntryResumed) return false
-    return currentRoute != null &&
-        currentRoute != AppDestinations.MAIN_ROUTE &&
-        currentRoute != AppDestinations.PDF_VIEWER_ROUTE &&
-        currentRoute != AppDestinations.EPUB_READER_ROUTE
+    return currentRoute != null && currentRoute != AppDestinations.MAIN_ROUTE
+}
+
+fun shouldSyncSelectedFileRoute(currentRoute: String?): Boolean {
+    return currentRoute == null ||
+        currentRoute == AppDestinations.MAIN_ROUTE ||
+        currentRoute == AppDestinations.PDF_VIEWER_ROUTE ||
+        currentRoute == AppDestinations.EPUB_READER_ROUTE
 }
 
 private fun NavHostController.isReadyForBackStackChange(): Boolean {
@@ -186,7 +190,7 @@ fun AppNavigation(
     )
 
     LaunchedEffect(currentRoute, uiState.selectedFileType, uiState.isLoading, uiState.selectedEpubBook, uiState.selectedPdfUri) {
-        if (!uiState.isLoading) {
+        if (!uiState.isLoading && shouldSyncSelectedFileRoute(currentRoute)) {
             when (uiState.selectedFileType?.readerSurfaceOnAndroid()) {
                 ReaderFeatureSurface.PDF_VIEWER -> {
                     if (uiState.selectedPdfUri != null) {
@@ -214,7 +218,11 @@ fun AppNavigation(
 
     Box(modifier = Modifier.fillMaxSize()) {
         BackHandler(enabled = shouldInterceptBack) {
-            navController.popBackStackIfReady()
+            when (currentRoute) {
+                AppDestinations.PDF_VIEWER_ROUTE,
+                AppDestinations.EPUB_READER_ROUTE -> viewModel.clearSelectedFile()
+                else -> navController.popBackStackIfReady()
+            }
         }
 
         NavHost(navController = navController, startDestination = AppDestinations.MAIN_ROUTE) {
@@ -241,9 +249,22 @@ fun AppNavigation(
             val initialBookmarksJson = uiState.initialBookmarksJson
 
             val bookId =
-                uiState.recentFiles.find { it.uriString == uiState.selectedPdfUri.toString() }?.bookId
+                uiState.selectedBookId
+                    ?: uiState.allRecentFiles.find { it.uriString == uiState.selectedPdfUri.toString() }?.bookId
+                    ?: uiState.rawLibraryFiles.find { it.uriString == uiState.selectedPdfUri.toString() }?.bookId
+                    ?: uiState.recentFiles.find { it.uriString == uiState.selectedPdfUri.toString() }?.bookId
 
             if (pdfUri != null) {
+                val navItem = bookId?.let { id ->
+                    uiState.allRecentFiles.find { it.bookId == id }
+                        ?: uiState.rawLibraryFiles.find { it.bookId == id }
+                        ?: uiState.recentFiles.find { it.bookId == id }
+                }
+                Timber.tag(PDF_RENAME_TRACE_TAG).i(
+                    "navigation.pdf routeBookId=$bookId selectedBookId=${uiState.selectedBookId} " +
+                        "uri=$pdfUri displayName=${navItem?.displayName} title=${navItem?.title} " +
+                        "customName=${navItem?.customName} usePdfFileName=${uiState.usePdfFileNameAsDisplayName}"
+                )
                 Timber.i("Displaying PDF Viewer for URI: $pdfUri, initialPage: $initialPage")
                 Box(modifier = Modifier.fillMaxSize()) {
                     PdfViewerScreen(
@@ -397,13 +418,13 @@ fun AppNavigation(
 
         composable(route = AppDestinations.FEEDBACK_SCREEN_ROUTE) {
             FeedbackScreen(
-                navController = navController
+                onNavigateBack = { navController.popBackStackIfReady() }
             )
         }
 
         composable(route = AppDestinations.SUPPORT_PROJECT_SCREEN_ROUTE) {
             SupportProjectScreen(
-                navController = navController
+                onNavigateBack = { navController.popBackStackIfReady() }
             )
         }
 

@@ -165,6 +165,7 @@ fun SharedHomeScreen(
     onToggleSelection: (String) -> Unit,
     onClearSelection: () -> Unit,
     onRemoveSelected: () -> Unit,
+    onExportAnnotations: (BookItem) -> Unit = {},
     onShowBookInfo: (BookItem) -> Unit = {},
     onEditBook: (BookItem) -> Unit = {},
     onSaveOriginalFile: (BookItem) -> Unit = {},
@@ -238,6 +239,7 @@ fun SharedHomeScreen(
                 count = selectedBooks.size,
                 onClear = onClearSelection,
                 onRemove = onRemoveSelected,
+                onExportAnnotations = selectedBooks.singleOrNull()?.let { book -> { onExportAnnotations(book) } },
                 onTag = onTagSelectedBooks,
                 onAddToShelf = onAddSelectedBooksToShelf,
                 onPin = {
@@ -350,6 +352,7 @@ fun SharedLibraryScreen(
     onToggleSelection: (String) -> Unit,
     onClearSelection: () -> Unit,
     onRemoveSelected: () -> Unit,
+    onExportAnnotations: (BookItem) -> Unit = {},
     onShowBookInfo: (BookItem) -> Unit = {},
     onEditBook: (BookItem) -> Unit = {},
     onSaveOriginalFile: (BookItem) -> Unit = {},
@@ -359,6 +362,7 @@ fun SharedLibraryScreen(
     onCreateSmartShelf: () -> Unit = {},
     onRenameShelf: (Shelf) -> Unit = {},
     onDeleteShelf: (Shelf) -> Unit = {},
+    onDeleteTag: (Shelf) -> Unit = {},
     onRemoveFolder: (Shelf) -> Unit = {},
     onTagSelectedBooks: () -> Unit = {},
     onAddSelectedBooksToShelf: () -> Unit = {},
@@ -405,6 +409,7 @@ fun SharedLibraryScreen(
                 count = state.selectedBookIds.size,
                 onClear = onClearSelection,
                 onRemove = onRemoveSelected,
+                onExportAnnotations = selectedBooks.singleOrNull()?.let { book -> { onExportAnnotations(book) } },
                 onTag = onTagSelectedBooks,
                 onAddToShelf = onAddSelectedBooksToShelf,
                 onSelectAll = {
@@ -476,6 +481,7 @@ fun SharedLibraryScreen(
                                 onManageShelfBooks = onManageShelfBooks,
                                 onRenameShelf = onRenameShelf,
                                 onDeleteShelf = onDeleteShelf,
+                                onDeleteTag = onDeleteTag,
                                 onRemoveFolder = onRemoveFolder,
                                 onSyncFolderMetadata = onSyncFolderMetadata,
                                 onScanFolders = onScanFolders,
@@ -527,6 +533,7 @@ fun SharedLibraryScreen(
                             onManageShelfBooks = onManageShelfBooks,
                             onRenameShelf = onRenameShelf,
                             onDeleteShelf = onDeleteShelf,
+                            onDeleteTag = onDeleteTag,
                             onRemoveFolder = onRemoveFolder,
                             onSyncFolderMetadata = onSyncFolderMetadata,
                             onScanFolders = onScanFolders,
@@ -553,6 +560,7 @@ fun SharedShelvesScreen(
     onCreateSmartShelf: () -> Unit = {},
     onRenameShelf: (Shelf) -> Unit = {},
     onDeleteShelf: (Shelf) -> Unit = {},
+    onDeleteTag: (Shelf) -> Unit = {},
     onRemoveFolder: (Shelf) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -581,6 +589,7 @@ fun SharedShelvesScreen(
             onTogglePinned = onTogglePinned,
             onRenameShelf = onRenameShelf,
             onDeleteShelf = onDeleteShelf,
+            onDeleteTag = onDeleteTag,
             onRemoveFolder = onRemoveFolder,
             emptyTitle = readerString("desktop_no_shelves_yet", "No shelves yet"),
             emptyBody = readerString(
@@ -737,7 +746,8 @@ private fun SelectionToolbar(
     selectAllLabel: String = "Select visible",
     onPin: (() -> Unit)? = null,
     pinLabel: String = "Pin",
-    onInfo: (() -> Unit)? = null
+    onInfo: (() -> Unit)? = null,
+    onExportAnnotations: (() -> Unit)? = null
 ) {
     Surface(
         shape = RoundedCornerShape(8.dp),
@@ -784,6 +794,24 @@ private fun SelectionToolbar(
                         Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(selectAllLabel)
+                    }
+                }
+                onExportAnnotations?.let { export ->
+                    var exportMenuExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { exportMenuExpanded = true }, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Default.MoreVert, contentDescription = readerString("desktop_more", "More"), modifier = Modifier.size(18.dp))
+                        }
+                        DropdownMenu(expanded = exportMenuExpanded, onDismissRequest = { exportMenuExpanded = false }) {
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
+                                text = { Text(readerString("action_export_annotations", "Export annotations")) },
+                                onClick = {
+                                    exportMenuExpanded = false
+                                    export()
+                                }
+                            )
+                        }
                     }
                 }
                 TextButton(onClick = onClear) {
@@ -1277,6 +1305,7 @@ private fun LibraryContent(
     onManageShelfBooks: ((Shelf) -> Unit)?,
     onRenameShelf: (Shelf) -> Unit,
     onDeleteShelf: (Shelf) -> Unit,
+    onDeleteTag: (Shelf) -> Unit,
     onRemoveFolder: (Shelf) -> Unit,
     onSyncFolderMetadata: () -> Unit,
     onScanFolders: () -> Unit,
@@ -1453,6 +1482,7 @@ private fun LibraryContent(
                 onShareOriginalFile = shareOriginalFileAction,
                 onTogglePinned = onTogglePinned,
                 onAddBooksToShelf = addToShelfFromBookAction,
+                onDeleteTag = onDeleteTag,
                 emptyTitle = readerString("desktop_no_tags_yet", "No tags yet"),
                 emptyBody = readerString("desktop_no_tags_desc", "Tags added to books will appear here."),
                 modifier = Modifier.weight(1f)
@@ -2222,6 +2252,7 @@ private fun ShelfCollection(
     onManageShelfBooks: ((Shelf) -> Unit)? = null,
     onRenameShelf: (Shelf) -> Unit = {},
     onDeleteShelf: (Shelf) -> Unit = {},
+    onDeleteTag: (Shelf) -> Unit = {},
     onRemoveFolder: (Shelf) -> Unit = {},
     onOpenShelf: ((Shelf) -> Unit)? = null,
     onCreateShelf: (() -> Unit)? = null,
@@ -2263,6 +2294,7 @@ private fun ShelfCollection(
                 onManageShelfBooks = onManageShelfBooks,
                 onRenameShelf = onRenameShelf,
                 onDeleteShelf = onDeleteShelf,
+                onDeleteTag = onDeleteTag,
                 onRemoveFolder = onRemoveFolder,
                 onOpenShelf = onOpenShelf
             )
@@ -2286,6 +2318,7 @@ private fun ShelfSection(
     onManageShelfBooks: ((Shelf) -> Unit)?,
     onRenameShelf: (Shelf) -> Unit,
     onDeleteShelf: (Shelf) -> Unit,
+    onDeleteTag: (Shelf) -> Unit,
     onRemoveFolder: (Shelf) -> Unit,
     onOpenShelf: ((Shelf) -> Unit)?
 ) {
@@ -2348,6 +2381,10 @@ private fun ShelfSection(
                     }
                     IconButton(onClick = { onDeleteShelf(shelf) }, modifier = Modifier.size(34.dp)) {
                         Icon(Icons.Default.Delete, contentDescription = readerString("menu_delete_shelf", "Delete shelf"), modifier = Modifier.size(18.dp))
+                    }
+                } else if (shelf.type == ShelfType.TAG) {
+                    IconButton(onClick = { onDeleteTag(shelf) }, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.Delete, contentDescription = readerString("menu_delete_tag", "Delete tag"), modifier = Modifier.size(18.dp))
                     }
                 } else if (shelf.type == ShelfType.FOLDER && shelf.parentShelfId == null) {
                     IconButton(onClick = { onRemoveFolder(shelf) }, modifier = Modifier.size(34.dp)) {

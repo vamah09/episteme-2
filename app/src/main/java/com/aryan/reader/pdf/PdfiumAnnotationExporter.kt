@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.isSpecified
 import com.aryan.reader.pdf.data.PdfAnnotation
 import com.aryan.reader.pdf.data.PdfTextBox
 import com.aryan.reader.pdf.data.VirtualPage
+import com.aryan.reader.shared.HighlightStyle
 import com.aryan.reader.shared.pdf.PdfAnnotationKind
 import com.aryan.reader.shared.pdf.PdfInkTool
 import com.aryan.reader.shared.pdf.PdfPageBounds
@@ -78,7 +79,8 @@ internal object PdfiumAnnotationExporter {
         inkAnnotations: Map<Int, List<PdfAnnotation>>,
         richTextPageLayouts: List<PageTextLayout>? = null,
         textBoxes: List<PdfTextBox>? = null,
-        highlights: List<PdfUserHighlight>? = null
+        highlights: List<PdfUserHighlight>? = null,
+        customHighlightColors: Map<PdfHighlightColor, Color> = emptyMap()
     ) {
         withContext(Dispatchers.IO) {
             if (!supportsOriginalPageOrder(virtualPages)) {
@@ -121,6 +123,7 @@ internal object PdfiumAnnotationExporter {
                     inkAnnotations = inkAnnotations,
                     textBoxes = emptyList(),
                     highlights = highlights.orEmpty(),
+                    customHighlightColors = customHighlightColors,
                     richTextPageLayouts = emptyList(),
                     rasterOverlays = rasterOverlays,
                     pageSizes = pageSizes
@@ -160,6 +163,7 @@ internal object PdfiumAnnotationExporter {
                         rasterPixelOffsets = payload.rasterPixelOffsets,
                         rasterPixels = payload.rasterPixels,
                         highlightPageIndices = payload.highlightPageIndices,
+                        highlightSubtypes = payload.highlightSubtypes,
                         highlightColors = payload.highlightColors,
                         highlightRectOffsets = payload.highlightRectOffsets,
                         highlightRectCounts = payload.highlightRectCounts,
@@ -206,6 +210,7 @@ internal object PdfiumAnnotationExporter {
         inkAnnotations: Map<Int, List<PdfAnnotation>>,
         textBoxes: List<PdfTextBox>,
         highlights: List<PdfUserHighlight>,
+        customHighlightColors: Map<PdfHighlightColor, Color> = emptyMap(),
         richTextPageLayouts: List<PageTextLayout> = emptyList(),
         fontPathResolver: (String?) -> String? = { it },
         rasterOverlays: List<PdfiumRasterOverlay> = emptyList(),
@@ -215,6 +220,7 @@ internal object PdfiumAnnotationExporter {
             sharedExportAnnotations(
                 inkAnnotations = inkAnnotations,
                 highlights = highlights,
+                customHighlightColors = customHighlightColors,
                 pageSizes = pageSizes
             )
         )
@@ -284,6 +290,7 @@ internal object PdfiumAnnotationExporter {
 
         val boundedHighlights = exportPayload.highlightAnnotations
         val highlightPageIndices = IntArray(boundedHighlights.size)
+        val highlightSubtypes = IntArray(boundedHighlights.size)
         val highlightColors = IntArray(boundedHighlights.size)
         val highlightRectOffsets = IntArray(boundedHighlights.size)
         val highlightRectCounts = IntArray(boundedHighlights.size)
@@ -304,6 +311,7 @@ internal object PdfiumAnnotationExporter {
         var highlightCommentCursor = 0
         boundedHighlights.forEachIndexed { index, highlight ->
             highlightPageIndices[index] = highlight.pageIndex
+            highlightSubtypes[index] = highlight.style.toPdfiumTextMarkupSubtype()
             highlightColors[index] = highlight.colorArgb
             highlightRectOffsets[index] = highlightRectCursor / 4
             highlightRectCounts[index] = highlight.boundsList.size
@@ -358,6 +366,7 @@ internal object PdfiumAnnotationExporter {
             rasterPixelOffsets = rasterPixelOffsets,
             rasterPixels = rasterPixels,
             highlightPageIndices = highlightPageIndices,
+            highlightSubtypes = highlightSubtypes,
             highlightColors = highlightColors,
             highlightRectOffsets = highlightRectOffsets,
             highlightRectCounts = highlightRectCounts,
@@ -378,6 +387,7 @@ internal object PdfiumAnnotationExporter {
     private fun sharedExportAnnotations(
         inkAnnotations: Map<Int, List<PdfAnnotation>>,
         highlights: List<PdfUserHighlight>,
+        customHighlightColors: Map<PdfHighlightColor, Color>,
         pageSizes: List<PdfiumPageSize>
     ): List<SharedPdfAnnotation> {
         val annotations = mutableListOf<SharedPdfAnnotation>()
@@ -412,12 +422,22 @@ internal object PdfiumAnnotationExporter {
                 text = highlight.text,
                 note = highlight.note,
                 comments = highlight.comments,
-                colorArgb = highlight.color.color.toArgb(),
+                colorArgb = highlight.resolvedColor(customHighlightColors).toArgb(),
+                highlightStyle = highlight.style,
                 rangeStartIndex = highlight.range.first,
                 rangeEndIndex = (highlight.range.second - 1).coerceAtLeast(highlight.range.first)
             )
         }
         return annotations
+    }
+
+    internal fun HighlightStyle.toPdfiumTextMarkupSubtype(): Int {
+        return when (this) {
+            HighlightStyle.BACKGROUND -> PDFIUM_ANNOT_HIGHLIGHT
+            HighlightStyle.UNDERLINE -> PDFIUM_ANNOT_UNDERLINE
+            HighlightStyle.WAVY_UNDERLINE -> PDFIUM_ANNOT_SQUIGGLY
+            HighlightStyle.STRIKETHROUGH -> PDFIUM_ANNOT_STRIKEOUT
+        }
     }
 
     private fun InkType.toSharedPdfInkTool(): PdfInkTool {
@@ -898,6 +918,11 @@ private class TypefaceSpanCompat(
     }
 }
 
+internal const val PDFIUM_ANNOT_HIGHLIGHT = 9
+internal const val PDFIUM_ANNOT_UNDERLINE = 10
+internal const val PDFIUM_ANNOT_SQUIGGLY = 11
+internal const val PDFIUM_ANNOT_STRIKEOUT = 12
+
 internal data class PdfiumAnnotationExportPayload(
     val inkPageIndices: IntArray,
     val inkTypes: IntArray,
@@ -924,6 +949,7 @@ internal data class PdfiumAnnotationExportPayload(
     val rasterPixelOffsets: IntArray,
     val rasterPixels: IntArray,
     val highlightPageIndices: IntArray,
+    val highlightSubtypes: IntArray,
     val highlightColors: IntArray,
     val highlightRectOffsets: IntArray,
     val highlightRectCounts: IntArray,
