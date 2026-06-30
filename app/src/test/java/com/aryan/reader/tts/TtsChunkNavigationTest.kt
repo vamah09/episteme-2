@@ -115,6 +115,97 @@ class TtsChunkNavigationTest {
         assertEquals(false, shouldStopTtsPrefetchAfterMissingChunk(isLoaded = false, playlistIndex = 2))
     }
 
+    @Test
+    fun `prefetch loop restarts when expected next chunk is missing`() {
+        assertEquals(
+            true,
+            shouldSkipExistingTtsPrefetchLoop(
+                currentChunkIndex = 3,
+                lastPrefetchIndex = 3,
+                isLoopActive = true,
+                nextChunkLoaded = false,
+                nextChunkPrefetching = true
+            )
+        )
+        assertEquals(
+            false,
+            shouldSkipExistingTtsPrefetchLoop(
+                currentChunkIndex = 3,
+                lastPrefetchIndex = 3,
+                isLoopActive = true,
+                nextChunkLoaded = false,
+                nextChunkPrefetching = false
+            )
+        )
+    }
+
+    @Test
+    fun `playlist exposure waits for contiguous previous chunk`() {
+        assertEquals(true, canExposeTtsChunkInPlaylist(2, listOf(0, 1)))
+        assertEquals(false, canExposeTtsChunkInPlaylist(3, listOf(0, 1)))
+        assertEquals(2, resolveContiguousTtsPlaylistInsertPosition(2, listOf(0, 1)))
+        assertNull(resolveContiguousTtsPlaylistInsertPosition(3, listOf(0, 1)))
+    }
+
+    @Test
+    fun `forward skip waits for target chunk already being prefetched`() {
+        assertEquals(
+            true,
+            shouldWaitForInFlightTtsSkip(
+                direction = 1,
+                isTargetPrefetching = true,
+                targetPlaylistIndex = null
+            )
+        )
+        assertEquals(
+            false,
+            shouldWaitForInFlightTtsSkip(
+                direction = -1,
+                isTargetPrefetching = true,
+                targetPlaylistIndex = null
+            )
+        )
+        assertEquals(
+            false,
+            shouldWaitForInFlightTtsSkip(
+                direction = 1,
+                isTargetPrefetching = true,
+                targetPlaylistIndex = 2
+            )
+        )
+    }
+
+    @Test
+    fun `native tts processing timeout waits while audio is progressing`() {
+        assertEquals(
+            false,
+            shouldTimeoutNativeTtsProcessing(
+                requestElapsedMs = 18_000L,
+                idleElapsedMs = 20L,
+                maxTimeoutMs = 60_000L,
+                idleTimeoutMs = 15_000L
+            )
+        )
+        assertEquals(
+            true,
+            shouldTimeoutNativeTtsProcessing(
+                requestElapsedMs = 18_000L,
+                idleElapsedMs = 15_000L,
+                maxTimeoutMs = 60_000L,
+                idleTimeoutMs = 15_000L
+            )
+        )
+        assertEquals(
+            true,
+            shouldTimeoutNativeTtsProcessing(
+                requestElapsedMs = 60_000L,
+                idleElapsedMs = 20L,
+                maxTimeoutMs = 60_000L,
+                idleTimeoutMs = 15_000L
+            )
+        )
+    }
+
     @androidx.annotation.OptIn(UnstableApi::class)
     @Test
     fun `reader tts mini bar is visible only for active reader playback outside reader routes`() {
